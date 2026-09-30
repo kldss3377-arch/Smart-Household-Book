@@ -4,6 +4,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import sqlite3
 import io
+import re
 
 # -------------------------------------------------------------
 # 1. 페이지 설정 & 글래스모피즘 / 아이소메트릭 테마 스타일
@@ -53,6 +54,15 @@ st.markdown("""
     .val-red { color: #f87171; text-shadow: 0 0 15px rgba(248, 113, 113, 0.35); }
     .val-green { color: #4ade80; text-shadow: 0 0 15px rgba(74, 222, 128, 0.35); }
     .val-amber { color: #fbbf24; text-shadow: 0 0 15px rgba(251, 191, 36, 0.35); }
+    
+    /* 붉은색 강조 경고 박스 */
+    .danger-box {
+        background: rgba(239, 68, 68, 0.15);
+        border: 2px solid #ef4444;
+        border-radius: 14px;
+        padding: 16px 20px;
+        margin-bottom: 20px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -70,7 +80,6 @@ def init_db():
     conn = get_db_connection()
     cur = conn.cursor()
     
-    # 0) 시스템 설정
     cur.execute("""
     CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
@@ -80,7 +89,6 @@ def init_db():
     if cur.fetchone() is None:
         cur.execute("INSERT INTO settings (key, value) VALUES ('app_password', '1234')")
     
-    # 1) 대분류 - 중분류 - 소분류 3단계 마스터 테이블
     cur.execute("""
     CREATE TABLE IF NOT EXISTS category_hierarchy_3tier (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -91,7 +99,6 @@ def init_db():
         UNIQUE(type, cat_large, cat_mid, cat_small)
     )""")
     
-    # 2) 거래 내역 테이블 (년도 컬럼 및 3단계 분류 포함)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS variable_records (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -109,7 +116,6 @@ def init_db():
         source TEXT DEFAULT '수기'
     )""")
     
-    # 3) 지능형 자동 분류 규칙 (3단계 연동)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS auto_rules_3tier (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -121,7 +127,6 @@ def init_db():
     )""")
     conn.commit()
 
-    # 컬럼 누락 방어
     cur.execute("PRAGMA table_info(variable_records)")
     v_cols = [row[1] for row in cur.fetchall()]
     if "year" not in v_cols: cur.execute("ALTER TABLE variable_records ADD COLUMN year INTEGER")
@@ -133,7 +138,7 @@ def init_db():
     if "source" not in v_cols: cur.execute("ALTER TABLE variable_records ADD COLUMN source TEXT DEFAULT '수기'")
     conn.commit()
 
-    # [핵심] 기존 DB 내 잘못 들어간 년도/월 일괄 복구
+    # DB 내 기존 레코드의 잘못된 년도/월 일괄 복구
     cur.execute("""
     UPDATE variable_records 
     SET year = CAST(SUBSTR(REPLACE(date, '-', '.'), 1, 4) AS INTEGER),
@@ -146,13 +151,11 @@ def init_db():
     cur.execute("SELECT COUNT(*) FROM category_hierarchy_3tier")
     if cur.fetchone()[0] == 0:
         base_3tier = [
-            # 수입 (대 > 중 > 소)
             ('수입', '근로소득', '정기급여', '본인급여'), ('수입', '근로소득', '정기급여', '배우자급여'),
             ('수입', '근로소득', '성과/상여', '명절상여'), ('수입', '근로소득', '성과/상여', '회사성과급'),
             ('수입', '금융/투자', '이자수익', '예적금이자'), ('수입', '금융/투자', '배당수익', '국내외배당'),
             ('수입', '기타소득', '부수입', '중고거래'), ('수입', '기타소득', '부수입', '원고료/자문료'),
             ('수입', '기타소득', '환급/지원', '연말정산환급'), ('수입', '기타소득', '환급/지원', '정부지원금'),
-            # 지출 (대 > 중 > 소)
             ('지출', '생활필수', '식비/장보기', '마트/농협'), ('지출', '생활필수', '식비/장보기', '정육/청과'), ('지출', '생활필수', '식비/장보기', '간식/생필품'),
             ('지출', '생활필수', '주거/통신', '관리비/공과금'), ('지출', '생활필수', '주거/통신', '통신비/인터넷'), ('지출', '생활필수', '주거/통신', '도시가스/난방'),
             ('지출', '생활필수', '보건/의료', '병원진료'), ('지출', '생활필수', '보건/의료', '약국처방'), ('지출', '생활필수', '보건/의료', '동물병원'),
@@ -169,7 +172,6 @@ def init_db():
         ]
         cur.executemany("INSERT OR IGNORE INTO category_hierarchy_3tier (type, cat_large, cat_mid, cat_small) VALUES (?, ?, ?, ?)", base_3tier)
 
-    # 기본 3계층 자동 분류 규칙 주입
     cur.execute("SELECT COUNT(*) FROM auto_rules_3tier")
     if cur.fetchone()[0] == 0:
         base_rules = [
@@ -272,7 +274,7 @@ if not st.session_state.authenticated:
     st.stop()
 
 # -------------------------------------------------------------
-# 4. 데이터 조회 및 정밀 계산 함수 (순수 거래 데이터 기반)
+# 4. 데이터 조회 및 계산 함수
 # -------------------------------------------------------------
 def get_3tier_hierarchy(r_type=None):
     conn = get_db_connection()
@@ -313,7 +315,6 @@ def auto_classify_3tier(sender_receiver, memo, r_type, summary_field):
         return '기타소득', '기타수입', '기타'
     return '기타', '예비비', '기타지출'
 
-# 수지 집계 함수 (단일 연도: 1~12월, 전체: 2020~2026년)
 def calculate_summary(year_filter):
     df_var = get_variable_records(year_filter)
     
@@ -357,7 +358,6 @@ def calculate_summary(year_filter):
             })
         return pd.DataFrame(summary), "월"
 
-# 3계층 피벗 테이블 생성
 def generate_3tier_pivot(year_filter, r_type='지출'):
     df_var = get_variable_records(year_filter)
     filtered = df_var[df_var['type'] == r_type] if not df_var.empty else pd.DataFrame()
@@ -446,7 +446,7 @@ st.sidebar.download_button(
 )
 
 # -------------------------------------------------------------
-# 메뉴 1: 연간 통합 대시보드 (아이소메트릭 & 글래스모피즘 UI)
+# 메뉴 1: 연간 통합 대시보드
 # -------------------------------------------------------------
 if menu == "연간 통합 대시보드":
     st.title(f"📊 {selected_year_str} 수입 / 지출 통합 대시보드")
@@ -489,7 +489,6 @@ if menu == "연간 통합 대시보드":
         
     st.divider()
     
-    # 수지 추이 차트
     fig_bar = go.Figure()
     fig_bar.add_trace(go.Bar(x=df_summary[x_axis_col], y=df_summary["총 수입"], name="총 수입", marker_color="#38bdf8"))
     fig_bar.add_trace(go.Bar(x=df_summary[x_axis_col], y=df_summary["총 지출"], name="총 지출", marker_color="#f87171"))
@@ -533,7 +532,7 @@ if menu == "연간 통합 대시보드":
     st.dataframe(df_summary.style.format(fmt_dict), use_container_width=True)
 
 # -------------------------------------------------------------
-# 메뉴 2: 월별 수입/지출 내역 관리 (대-중-소 연동)
+# 메뉴 2: 월별 수입/지출 내역 관리
 # -------------------------------------------------------------
 elif menu == "월별 수입/지출 내역 관리":
     col_sel_y, col_sel_m = st.columns(2)
@@ -566,7 +565,6 @@ elif menu == "월별 수입/지출 내역 관리":
     
     st.divider()
     
-    # 1) 수정 모드
     if 'editing_record_id' not in st.session_state:
         st.session_state.editing_record_id = None
 
@@ -619,7 +617,6 @@ elif menu == "월별 수입/지출 내역 관리":
                     st.session_state.editing_record_id = None
                     st.rerun()
 
-    # 2) 신규 내역 등록 (대-중-소 단계별 동적 연동)
     st.subheader(f"➕ {target_year}년 {selected_month} 새로운 내역 직접 추가")
     c_y, c_type, c_large, c_mid, c_small = st.columns(5)
     rec_year = c_y.number_input("해당 년도", min_value=2020, max_value=2035, value=target_year, key="add_rec_year")
@@ -659,7 +656,6 @@ elif menu == "월별 수입/지출 내역 관리":
             else:
                 st.error("항목명과 유효한 금액을 입력해 주세요.")
 
-    # 3) 등록 내역 목록 테이블
     st.subheader(f"📝 {selected_month} 등록 내역 목록 (총 {len(m_records)}건)")
     if not m_records.empty:
         h1, h2, h3, h4, h5, h6, h7, h8, h9, h10 = st.columns([1.0, 0.8, 2.0, 1.5, 1.2, 1.2, 1.2, 0.8, 0.6, 0.6])
@@ -676,7 +672,7 @@ elif menu == "월별 수입/지출 내역 관리":
             c6.text(f"{row['cat_mid']}")
             c7.text(f"{row['cat_small']}")
             c8.caption(f"{row['source']}")
-            if c9.button("✏️️", key=f"edit_btn_{row['id']}"):
+            if c9.button("✏️", key=f"edit_btn_{row['id']}"):
                 st.session_state.editing_record_id = row['id']
                 st.rerun()
             if c10.button("🗑", key=f"del_rec_{row['id']}"):
@@ -690,7 +686,7 @@ elif menu == "월별 수입/지출 내역 관리":
         st.info("해당 월에 등록된 거래 내역이 없습니다.")
 
 # -------------------------------------------------------------
-# 메뉴 3: 📊 3단계 분류 심층 통계 분석 (통합 & 개별 뷰)
+# 메뉴 3: 📊 3단계 분류 심층 통계 분석
 # -------------------------------------------------------------
 elif menu == "📊 3단계 분류 심층 통계 분석":
     st.title(f"📊 {selected_year_str} 3단계 분류 심층 통계 분석")
@@ -698,10 +694,8 @@ elif menu == "📊 3단계 분류 심층 통계 분석":
     
     df_var = get_variable_records(selected_year_str)
     
-    # 뷰 선택 모드
     view_mode = st.radio("분석 관점 선택", ["💸 지출 3단계 심층 분석", "💰 수입 3단계 심층 분석", "⚖️ 수입/지출 통합 비교 분석"], horizontal=True)
     
-    # 1) 지출 3단계 심층 분석
     if view_mode == "💸 지출 3단계 심층 분석":
         exp_df = df_var[df_var['type'] == '지출'] if not df_var.empty else pd.DataFrame()
         if exp_df.empty:
@@ -721,7 +715,6 @@ elif menu == "📊 3단계 분류 심층 통계 분석":
             
             st.divider()
             
-            # 사용자 맞춤 차트 선택기
             st.subheader("🎨 지출 인터랙티브 시각화 대시보드")
             chart_choice = st.selectbox(
                 "차트 형태 선택", 
@@ -767,13 +760,11 @@ elif menu == "📊 3단계 분류 심층 통계 분석":
                 fig = px.imshow(pivot_heat, labels=dict(x="기간", y="대분류", color="지출액"), aspect="auto", template="plotly_dark", color_continuous_scale="Reds", title="대분류별 지출 집중도 히트맵")
                 st.plotly_chart(fig, use_container_width=True)
                 
-            # 3단계 피벗 시트
             st.subheader(f"📑 [지출] 대분류 - 중분류 - 소분류 상세 집계표 ({selected_year_str})")
             exp_pivot = generate_3tier_pivot(selected_year_str, '지출')
             fmt = {col: "{:,}원" for col in exp_pivot.columns if col not in ['대분류', '중분류', '소분류']}
             st.dataframe(exp_pivot.style.format(fmt), use_container_width=True)
 
-    # 2) 수입 3단계 심층 분석
     elif view_mode == "💰 수입 3단계 심층 분석":
         inc_df = df_var[df_var['type'] == '수입'] if not df_var.empty else pd.DataFrame()
         if inc_df.empty:
@@ -805,7 +796,6 @@ elif menu == "📊 3단계 분류 심층 통계 분석":
             fmt_i = {col: "{:,}원" for col in inc_pivot.columns if col not in ['대분류', '중분류', '소분류']}
             st.dataframe(inc_pivot.style.format(fmt_i), use_container_width=True)
 
-    # 3) 수입 vs 지출 통합 비교 뷰
     else:
         st.subheader("⚖️ 수입 vs 지출 통합 대분류 비교 분석")
         if not df_var.empty:
@@ -823,7 +813,6 @@ elif menu == "📊 3단계 분류 심층 통계 분석":
             fig_compare.update_traces(texttemplate='%{y:,}원', textposition='outside')
             st.plotly_chart(fig_compare, use_container_width=True)
             
-            # 연도별 추이 (2020~2026 YoY)
             st.subheader("📅 연도별(Year-over-Year) 수입/지출 총액 추이")
             yoy_df = df_var.groupby(["year", "type"])["amount"].sum().reset_index()
             fig_yoy = px.bar(
@@ -840,13 +829,43 @@ elif menu == "📊 3단계 분류 심층 통계 분석":
             st.plotly_chart(fig_yoy, use_container_width=True)
 
 # -------------------------------------------------------------
-# 메뉴 4: 🏦 KB 국민은행 거래내역 엑셀 연동 (2020~2026 연도 분리 & 초기화 동기화)
+# 메뉴 4: 🏦 KB 국민은행 거래내역 엑셀 연동 (항상 보이는 초기화 재동기화 버튼 탑재)
 # -------------------------------------------------------------
 elif menu == "🏦 KB 거래내역 엑셀 연동":
     st.title("🏦 KB국민은행 거래내역 엑셀 자동 연동 (3단계)")
     st.info("💡 국민은행 거래내역 엑셀 파일(`.xls` 또는 `.xlsx`)을 업로드하면 2020년부터 2026년까지의 연도와 월이 정확하게 자동 추출되며, 3단계 규칙에 따라 100% 자동 분개됩니다.")
 
-    uploaded_file = st.file_uploader("KB국민은행 거래내역 엑셀 파일 업로드", type=["xls", "xlsx"])
+    # [핵심] 상시 노출되는 데이터베이스 원클릭 초기화 패널
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM variable_records WHERE source='KB국민'")
+    cur_kb_count = cur.fetchone()[0]
+    cur.execute("SELECT DISTINCT year FROM variable_records WHERE source='KB국민' ORDER BY year DESC")
+    cur_kb_years = [str(r[0]) for r in cur.fetchall()]
+    conn.close()
+    
+    st.markdown(f"""
+    <div class="danger-box">
+        <h4 style="color: #ef4444; margin-top:0;">🚨 KB국민은행 데이터 관리 & 초기화 센터</h4>
+        <p style="color: #fca5a5; font-size: 0.95rem;">
+            현재 등록된 KB 거래내역: <b>{cur_kb_count:,}건</b> (등록된 연도: {', '.join(cur_kb_years) if cur_kb_years else '없음'})<br>
+            이전에 연도가 잘못 저장되었거나 2026년으로 쏠려있는 경우, 아래 버튼을 눌러 깔끔하게 비운 뒤 재등록하세요.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    if st.button("🔥 [즉시 초기화] 기존 등록된 KB국민은행 거래내역 전부 삭제", type="primary", use_container_width=True):
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM variable_records WHERE source='KB국민'")
+        conn.commit()
+        conn.close()
+        st.success("✅ 기존 KB국민은행 거래내역이 전부 깨끗하게 삭제되었습니다. 이제 아래에서 파일을 업로드해 주세요.")
+        st.rerun()
+
+    st.divider()
+    st.subheader("📂 엑셀 파일 업로드 및 2020~2026년 신규 동기화")
+    uploaded_file = st.file_uploader("KB국민은행 거래내역 엑셀 파일 선택", type=["xls", "xlsx"])
     
     if uploaded_file is not None:
         try:
@@ -856,7 +875,7 @@ elif menu == "🏦 KB 거래내역 엑셀 연동":
                 df_kb_raw = df_kb_raw.iloc[1:].reset_index(drop=True)
                 
             df_kb = df_kb_raw[df_kb_raw['거래일시'].notna() & (df_kb_raw['거래일시'] != '합계')].copy()
-            st.success(f"파일 파싱 성공: 총 {len(df_kb)}건의 거래 내역을 인식했습니다.")
+            st.success(f"파일 분석 성공: 총 {len(df_kb)}건의 거래 내역을 인식했습니다.")
             
             parsed_rows = []
             for _, r in df_kb.iterrows():
@@ -870,7 +889,7 @@ elif menu == "🏦 KB 거래내역 엑셀 연동":
                 withdraw_amt = int(w_val) if w_val.isdigit() else 0
                 deposit_amt = int(d_val) if d_val.isdigit() else 0
                 
-                # [핵심] YYYY.MM.DD 또는 YYYY-MM-DD 앞자리 기준 연도/월 100% 정밀 추출
+                # [핵심] YYYY.MM.DD 앞자리 기준 연도/월 100% 정밀 추출
                 if len(dt_str) >= 7 and dt_str[:4].isdigit():
                     rec_year = int(dt_str[:4])
                     month_num = int(dt_str[5:7]) if dt_str[5:7].isdigit() else 1
@@ -913,28 +932,28 @@ elif menu == "🏦 KB 거래내역 엑셀 연동":
             st.subheader("👀 3단계 자동 분류 및 연도별 분개 미리보기")
             st.dataframe(preview_df[["year", "date", "type", "name", "amount", "cat_large", "cat_mid", "cat_small"]].head(15).style.format({"amount": "{:,}원"}), use_container_width=True)
             
-            # 연도별 건수 요약 표시
             year_counts = preview_df['year'].value_counts().sort_index()
-            st.markdown("### 📊 파싱된 연도별 거래 건수 검증 결과")
+            st.markdown("### 📊 연도별 추출 건수 검증 결과")
             y_cols = st.columns(len(year_counts))
             for i, (yr, cnt) in enumerate(year_counts.items()):
                 y_cols[i].metric(f"{yr}년", f"{cnt:,} 건")
             
             st.divider()
-            st.markdown("### 🚀 가계부 데이터베이스 동기화 실행")
             
-            # 원클릭 완전 재등록 버튼
+            # [요청하신 붉은색/주황색 원클릭 초기화 재동기화 버튼]
+            st.markdown("### 🚀 가계부 데이터베이스 반영 실행")
+            
             col_b1, col_b2 = st.columns([1.5, 1])
             with col_b1:
-                if st.button("🚨 [초기화 후 재동기화] 기존 KB 데이터 전체 삭제 후 2020~2026년 신규 동기화", use_container_width=True, type="primary"):
+                # 붉은색 메인 버튼
+                btn_reset_sync = st.button("🚨 [초기화 후 재동기화] 기존 KB 데이터 전체 삭제 후 2020~2026년 신규 동기화", type="primary", use_container_width=True)
+                if btn_reset_sync:
                     conn = get_db_connection()
                     cur = conn.cursor()
                     
-                    # 1. 기존 KB국민 출처 데이터 완전 삭제
                     cur.execute("DELETE FROM variable_records WHERE source='KB국민'")
                     conn.commit()
                     
-                    # 2. 연도별 데이터 일괄 등록
                     insert_tuples = [
                         (r['year'], r['month'], r['type'], r['date'], r['time'], r['name'], r['amount'], r['cat_large'], r['cat_mid'], r['cat_small'], r['memo'], r['source'])
                         for r in parsed_rows
@@ -948,9 +967,11 @@ elif menu == "🏦 KB 거래내역 엑셀 연동":
                     conn.close()
                     st.success(f"🎉 초기화 및 동기화 완료! 총 {len(insert_tuples):,}건의 거래가 2020년~2026년 연도별로 온전하게 등록되었습니다.")
                     st.balloons()
+                    st.rerun()
                     
             with col_b2:
-                if st.button("➕ [누적 추가] 기존 데이터 유지하고 중복 제외 추가", use_container_width=True):
+                btn_cum_sync = st.button("➕ [누적 추가] 기존 데이터 유지하고 추가", use_container_width=True)
+                if btn_cum_sync:
                     conn = get_db_connection()
                     cur = conn.cursor()
                     
@@ -976,6 +997,7 @@ elif menu == "🏦 KB 거래내역 엑셀 연동":
                     conn.close()
                     st.success(f"동기화 완료: 신규 등록 {inserted_cnt}건 (중복 건너뜀 {skipped_cnt}건)")
                     st.balloons()
+                    st.rerun()
         except Exception as e:
             st.error(f"파일 처리 중 오류가 발생했습니다: {e}")
 
@@ -1055,7 +1077,7 @@ elif menu == "⚙️ 지능형 자동분류 규칙 관리":
 # 메뉴 6: 🏷️ 대/중/소분류 체계 관리
 # -------------------------------------------------------------
 elif menu == "🏷️ 대/중/소분류 체계 관리":
-    st.title("🏷️️ 대분류 · 중분류 · 소분류 3단계 체계 관리")
+    st.title("🏷 대분류 · 중분류 · 소분류 3단계 체계 관리")
     st.info("💡 가계부에서 사용할 3단계 분류 체계를 자유롭게 추가하거나 삭제할 수 있습니다.")
     
     col_add_3, col_view_3 = st.columns([1, 1.5])
