@@ -4,7 +4,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 import sqlite3
 import io
-import re
 
 # -------------------------------------------------------------
 # 1. 페이지 설정 & 글래스모피즘 / 아이소메트릭 테마 스타일
@@ -15,7 +14,6 @@ st.set_page_config(
     layout="wide"
 )
 
-# 아이소메트릭 & 글래스모피즘 입체 스타일 CSS
 st.markdown("""
 <style>
     .main {
@@ -97,7 +95,7 @@ def init_db():
     cur.execute("""
     CREATE TABLE IF NOT EXISTS variable_records (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        year INTEGER DEFAULT 2026,
+        year INTEGER,
         month INTEGER,
         type TEXT,
         date TEXT,
@@ -126,7 +124,7 @@ def init_db():
     # 컬럼 누락 방어
     cur.execute("PRAGMA table_info(variable_records)")
     v_cols = [row[1] for row in cur.fetchall()]
-    if "year" not in v_cols: cur.execute("ALTER TABLE variable_records ADD COLUMN year INTEGER DEFAULT 2026")
+    if "year" not in v_cols: cur.execute("ALTER TABLE variable_records ADD COLUMN year INTEGER")
     if "cat_large" not in v_cols: cur.execute("ALTER TABLE variable_records ADD COLUMN cat_large TEXT DEFAULT '기타'")
     if "cat_mid" not in v_cols: cur.execute("ALTER TABLE variable_records ADD COLUMN cat_mid TEXT DEFAULT '기타'")
     if "cat_small" not in v_cols: cur.execute("ALTER TABLE variable_records ADD COLUMN cat_small TEXT DEFAULT '기타'")
@@ -135,7 +133,7 @@ def init_db():
     if "source" not in v_cols: cur.execute("ALTER TABLE variable_records ADD COLUMN source TEXT DEFAULT '수기'")
     conn.commit()
 
-    # [핵심] DB 내 기존 레코드의 잘못된 년도/월 일괄 복구 쿼리
+    # [핵심] 기존 DB 내 잘못 들어간 년도/월 일괄 복구
     cur.execute("""
     UPDATE variable_records 
     SET year = CAST(SUBSTR(REPLACE(date, '-', '.'), 1, 4) AS INTEGER),
@@ -274,7 +272,7 @@ if not st.session_state.authenticated:
     st.stop()
 
 # -------------------------------------------------------------
-# 4. 데이터 조회 및 계산 함수
+# 4. 데이터 조회 및 정밀 계산 함수 (순수 거래 데이터 기반)
 # -------------------------------------------------------------
 def get_3tier_hierarchy(r_type=None):
     conn = get_db_connection()
@@ -421,7 +419,6 @@ if st.sidebar.button("🚪 시스템 로그아웃"):
     st.session_state.authenticated = False
     st.rerun()
 
-# 엑셀 다운로드
 st.sidebar.divider()
 st.sidebar.subheader("💾 데이터 엑셀 내보내기")
 df_summary_export, _ = calculate_summary(selected_year_str)
@@ -679,7 +676,7 @@ elif menu == "월별 수입/지출 내역 관리":
             c6.text(f"{row['cat_mid']}")
             c7.text(f"{row['cat_small']}")
             c8.caption(f"{row['source']}")
-            if c9.button("✏️", key=f"edit_btn_{row['id']}"):
+            if c9.button("✏️️", key=f"edit_btn_{row['id']}"):
                 st.session_state.editing_record_id = row['id']
                 st.rerun()
             if c10.button("🗑", key=f"del_rec_{row['id']}"):
@@ -873,25 +870,17 @@ elif menu == "🏦 KB 거래내역 엑셀 연동":
                 withdraw_amt = int(w_val) if w_val.isdigit() else 0
                 deposit_amt = int(d_val) if d_val.isdigit() else 0
                 
-                # [핵심] 안전하고 유연한 연도/월/일자/시간 파싱
-                dt_clean = dt_str.replace('.', '-').strip()
-                try:
-                    dt_obj = pd.to_datetime(dt_clean)
-                    rec_year = dt_obj.year
-                    month_num = dt_obj.month
-                    date_part = dt_obj.strftime('%Y-%m-%d')
-                    time_part = dt_obj.strftime('%H:%M:%S')
-                except Exception:
-                    match = re.search(r'(\d{4})[^\d](\d{1,2})[^\d](\d{1,2})', dt_str)
-                    if match:
-                        rec_year = int(match.group(1))
-                        month_num = int(match.group(2))
-                        date_part = f"{rec_year}-{month_num:02d}-{int(match.group(3)):02d}"
-                    else:
-                        rec_year = 2026
-                        month_num = 1
-                        date_part = dt_str.split(' ')[0]
-                    time_part = dt_str.split(' ')[1] if ' ' in dt_str else ''
+                # [핵심] YYYY.MM.DD 또는 YYYY-MM-DD 앞자리 기준 연도/월 100% 정밀 추출
+                if len(dt_str) >= 7 and dt_str[:4].isdigit():
+                    rec_year = int(dt_str[:4])
+                    month_num = int(dt_str[5:7]) if dt_str[5:7].isdigit() else 1
+                    date_part = dt_str[:10].replace('.', '-')
+                    time_part = dt_str[11:].strip() if len(dt_str) > 11 else ''
+                else:
+                    rec_year = 2026
+                    month_num = 1
+                    date_part = dt_str.split(' ')[0]
+                    time_part = ''
                 
                 if withdraw_amt > 0:
                     rec_type = '지출'
@@ -926,31 +915,53 @@ elif menu == "🏦 KB 거래내역 엑셀 연동":
             
             # 연도별 건수 요약 표시
             year_counts = preview_df['year'].value_counts().sort_index()
-            st.markdown("**인식된 연도별 거래 건수 요약:**")
-            st.write(dict(year_counts))
+            st.markdown("### 📊 파싱된 연도별 거래 건수 검증 결과")
+            y_cols = st.columns(len(year_counts))
+            for i, (yr, cnt) in enumerate(year_counts.items()):
+                y_cols[i].metric(f"{yr}년", f"{cnt:,} 건")
             
-            # 옵션: 기존 데이터 초기화 후 새로 동기화 체크박스
-            reset_mode = st.checkbox("⚠️️ 기존 KB국민은행 내역을 전체 삭제하고 새로 깨끗하게 동기화 (년도 꼬임 해결 시 권장)", value=True)
+            st.divider()
+            st.markdown("### 🚀 가계부 데이터베이스 동기화 실행")
             
-            c_btn1, _ = st.columns([1, 2])
-            with c_btn1:
-                if st.button("🚀 이 거래내역을 가계부에 동기화하기", use_container_width=True):
+            # 원클릭 완전 재등록 버튼
+            col_b1, col_b2 = st.columns([1.5, 1])
+            with col_b1:
+                if st.button("🚨 [초기화 후 재동기화] 기존 KB 데이터 전체 삭제 후 2020~2026년 신규 동기화", use_container_width=True, type="primary"):
                     conn = get_db_connection()
                     cur = conn.cursor()
                     
-                    if reset_mode:
-                        cur.execute("DELETE FROM variable_records WHERE source='KB국민'")
-                        conn.commit()
-                        existing_keys = set()
-                    else:
-                        existing_df = pd.read_sql("SELECT date, time, name, amount FROM variable_records WHERE source='KB국민'", conn)
-                        existing_keys = set(zip(existing_df['date'], existing_df['time'], existing_df['name'], existing_df['amount']))
+                    # 1. 기존 KB국민 출처 데이터 완전 삭제
+                    cur.execute("DELETE FROM variable_records WHERE source='KB국민'")
+                    conn.commit()
+                    
+                    # 2. 연도별 데이터 일괄 등록
+                    insert_tuples = [
+                        (r['year'], r['month'], r['type'], r['date'], r['time'], r['name'], r['amount'], r['cat_large'], r['cat_mid'], r['cat_small'], r['memo'], r['source'])
+                        for r in parsed_rows
+                    ]
+                    cur.executemany("""
+                    INSERT INTO variable_records (year, month, type, date, time, name, amount, cat_large, cat_mid, cat_small, memo, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, insert_tuples)
+                    
+                    conn.commit()
+                    conn.close()
+                    st.success(f"🎉 초기화 및 동기화 완료! 총 {len(insert_tuples):,}건의 거래가 2020년~2026년 연도별로 온전하게 등록되었습니다.")
+                    st.balloons()
+                    
+            with col_b2:
+                if st.button("➕ [누적 추가] 기존 데이터 유지하고 중복 제외 추가", use_container_width=True):
+                    conn = get_db_connection()
+                    cur = conn.cursor()
+                    
+                    existing_df = pd.read_sql("SELECT year, date, time, name, amount FROM variable_records WHERE source='KB국민'", conn)
+                    existing_keys = set(zip(existing_df['year'], existing_df['date'], existing_df['time'], existing_df['name'], existing_df['amount']))
                     
                     inserted_cnt = 0
                     skipped_cnt = 0
                     
                     for row in parsed_rows:
-                        key = (row['date'], row['time'], row['name'], row['amount'])
+                        key = (row['year'], row['date'], row['time'], row['name'], row['amount'])
                         if key in existing_keys:
                             skipped_cnt += 1
                             continue
@@ -963,7 +974,7 @@ elif menu == "🏦 KB 거래내역 엑셀 연동":
                         
                     conn.commit()
                     conn.close()
-                    st.success(f"동기화 완료: 총 {inserted_cnt}건 신규 등록 (중복 건너뜀 {skipped_cnt}건)")
+                    st.success(f"동기화 완료: 신규 등록 {inserted_cnt}건 (중복 건너뜀 {skipped_cnt}건)")
                     st.balloons()
         except Exception as e:
             st.error(f"파일 처리 중 오류가 발생했습니다: {e}")
@@ -1041,10 +1052,10 @@ elif menu == "⚙️ 지능형 자동분류 규칙 관리":
             st.info("등록된 규칙이 없습니다.")
 
 # -------------------------------------------------------------
-# 메뉴 6: 🏷️️ 대/중/소분류 체계 관리
+# 메뉴 6: 🏷️ 대/중/소분류 체계 관리
 # -------------------------------------------------------------
-elif menu == "🏷️️ 대/중/소분류 체계 관리":
-    st.title("🏷️ 대분류 · 중분류 · 소분류 3단계 체계 관리")
+elif menu == "🏷️ 대/중/소분류 체계 관리":
+    st.title("🏷️️ 대분류 · 중분류 · 소분류 3단계 체계 관리")
     st.info("💡 가계부에서 사용할 3단계 분류 체계를 자유롭게 추가하거나 삭제할 수 있습니다.")
     
     col_add_3, col_view_3 = st.columns([1, 1.5])
