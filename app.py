@@ -6,13 +6,61 @@ import sqlite3
 import io
 
 # -------------------------------------------------------------
-# 1. 페이지 설정
+# 1. 페이지 설정 & 글래스모피즘/아이소메트릭 테마 스타일
 # -------------------------------------------------------------
 st.set_page_config(
-    page_title="스마트 가계부 & 3단계 분류 다차원 분석 시스템",
-    page_icon="💰",
+    page_title="스마트 가계부 & 3단계 다차원 자산분석",
+    page_icon="💎",
     layout="wide"
 )
+
+# 아이소메트릭 & 글래스모피즘 CSS 스타일 정의
+st.markdown("""
+<style>
+    /* 메인 배경 및 폰트 */
+    .main {
+        background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+        color: #f8fafc;
+    }
+    
+    /* 글래스모피즘 카드 컨테이너 */
+    .iso-card {
+        background: rgba(30, 41, 59, 0.7);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 16px;
+        padding: 20px 24px;
+        box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4), 0 8px 10px -6px rgba(0, 0, 0, 0.4);
+        margin-bottom: 16px;
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }
+    .iso-card:hover {
+        transform: translateY(-3px);
+        box-shadow: 0 14px 28px rgba(0, 0, 0, 0.5);
+    }
+    
+    /* 카드 타이틀 & 수치 */
+    .iso-label {
+        font-size: 0.95rem;
+        font-weight: 600;
+        color: #94a3b8;
+        margin-bottom: 6px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+    .iso-value {
+        font-size: 1.85rem;
+        font-weight: 800;
+        letter-spacing: -0.5px;
+    }
+    .val-blue { color: #38bdf8; text-shadow: 0 0 15px rgba(56, 189, 248, 0.3); }
+    .val-red { color: #f87171; text-shadow: 0 0 15px rgba(248, 113, 113, 0.3); }
+    .val-green { color: #4ade80; text-shadow: 0 0 15px rgba(74, 222, 128, 0.3); }
+    .val-amber { color: #fbbf24; text-shadow: 0 0 15px rgba(251, 191, 36, 0.3); }
+</style>
+""", unsafe_allow_html=True)
 
 DB_PATH = "household.db"
 
@@ -22,7 +70,7 @@ def get_db_connection():
     return conn
 
 # -------------------------------------------------------------
-# 2. SQLite DB 초기화 및 3단계 자동 마이그레이션 (고정항목 배제)
+# 2. SQLite DB 초기화 및 3단계 자동 마이그레이션
 # -------------------------------------------------------------
 def init_db():
     conn = get_db_connection()
@@ -42,14 +90,14 @@ def init_db():
     cur.execute("""
     CREATE TABLE IF NOT EXISTS category_hierarchy_3tier (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        type TEXT, -- '수입' or '지출'
-        cat_large TEXT, -- 대분류
-        cat_mid TEXT,   -- 중분류
-        cat_small TEXT, -- 소분류
+        type TEXT,
+        cat_large TEXT,
+        cat_mid TEXT,
+        cat_small TEXT,
         UNIQUE(type, cat_large, cat_mid, cat_small)
     )""")
     
-    # 2) 거래 내역 테이블 (년도 컬럼 및 3단계 분류 포함)
+    # 2) 거래 내역 테이블 (년도 컬럼 및 3단계 분류)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS variable_records (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,7 +127,7 @@ def init_db():
     )""")
     conn.commit()
 
-    # --- 기존 테이블 마이그레이션 (누락 컬럼 자동 추가) ---
+    # 스키마 자동 마이그레이션
     cur.execute("PRAGMA table_info(variable_records)")
     v_cols = [row[1] for row in cur.fetchall()]
     if "year" not in v_cols: cur.execute("ALTER TABLE variable_records ADD COLUMN year INTEGER DEFAULT 2026")
@@ -95,13 +143,13 @@ def init_db():
     cur.execute("SELECT COUNT(*) FROM category_hierarchy_3tier")
     if cur.fetchone()[0] == 0:
         base_3tier = [
-            # 수입 (대 > 중 > 소)
+            # 수입
             ('수입', '근로소득', '정기급여', '본인급여'), ('수입', '근로소득', '정기급여', '배우자급여'),
             ('수입', '근로소득', '성과/상여', '명절상여'), ('수입', '근로소득', '성과/상여', '회사성과급'),
             ('수입', '금융/투자', '이자수익', '예적금이자'), ('수입', '금융/투자', '배당수익', '국내외배당'),
             ('수입', '기타소득', '부수입', '중고거래'), ('수입', '기타소득', '부수입', '원고료/자문료'),
             ('수입', '기타소득', '환급/지원', '연말정산환급'), ('수입', '기타소득', '환급/지원', '정부지원금'),
-            # 지출 (대 > 중 > 소)
+            # 지출
             ('지출', '생활필수', '식비/장보기', '마트/농협'), ('지출', '생활필수', '식비/장보기', '정육/청과'), ('지출', '생활필수', '식비/장보기', '간식/생필품'),
             ('지출', '생활필수', '주거/통신', '관리비/공과금'), ('지출', '생활필수', '주거/통신', '통신비/인터넷'), ('지출', '생활필수', '주거/통신', '도시가스/난방'),
             ('지출', '생활필수', '보건/의료', '병원진료'), ('지출', '생활필수', '보건/의료', '약국처방'), ('지출', '생활필수', '보건/의료', '동물병원'),
@@ -201,10 +249,14 @@ def login_screen():
     st.markdown("<br><br>", unsafe_allow_html=True)
     _, col_center, _ = st.columns([1, 1.2, 1])
     with col_center:
-        st.markdown("### 🔐 스마트 가계부 로그인")
-        st.info("안전한 금융 데이터 관리를 위해 접속 비밀번호를 입력해 주세요. (초기 비밀번호: 1234)")
-        input_pw = st.text_input("접속 비밀번호", type="password", key="login_pw_input")
-        if st.button("로그인", use_container_width=True):
+        st.markdown("""
+        <div class="iso-card" style="text-align: center;">
+            <h2 style="color: #38bdf8; margin-bottom: 8px;">💎 스마트 가계부 로그인</h2>
+            <p style="color: #94a3b8; font-size: 0.95rem;">안전한 금융 데이터 관리를 위해 접속 비밀번호를 입력해 주세요.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        input_pw = st.text_input("접속 비밀번호 (초기값: 1234)", type="password", key="login_pw_input")
+        if st.button("시스템 접속", use_container_width=True):
             if input_pw == get_stored_password():
                 st.session_state.authenticated = True
                 st.success("인증 완료되었습니다.")
@@ -217,7 +269,7 @@ if not st.session_state.authenticated:
     st.stop()
 
 # -------------------------------------------------------------
-# 4. 데이터 조회 및 계산 헬퍼 함수
+# 4. 데이터 조회 및 계산 함수 (순수 거래 데이터 기반)
 # -------------------------------------------------------------
 def get_3tier_hierarchy(r_type=None):
     conn = get_db_connection()
@@ -231,21 +283,13 @@ def get_3tier_hierarchy(r_type=None):
 def get_variable_records(selected_year=None):
     conn = get_db_connection()
     if selected_year and selected_year != "전체":
-        df = pd.read_sql("SELECT * FROM variable_records WHERE year=? ORDER BY date DESC, time DESC, id DESC", conn, params=(int(selected_year),))
+        # 문자열에서 숫자 연도만 추출 (예: '2026년' -> 2026)
+        clean_y = int(str(selected_year).replace("년", ""))
+        df = pd.read_sql("SELECT * FROM variable_records WHERE year=? ORDER BY date DESC, time DESC, id DESC", conn, params=(clean_y,))
     else:
         df = pd.read_sql("SELECT * FROM variable_records ORDER BY year DESC, date DESC, time DESC, id DESC", conn)
     conn.close()
     return df
-
-def get_available_years():
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT DISTINCT year FROM variable_records WHERE year IS NOT NULL ORDER BY year DESC")
-    rows = [r[0] for r in cur.fetchall()]
-    conn.close()
-    if not rows:
-        return [2026]
-    return rows
 
 def get_auto_rules_3tier():
     conn = get_db_connection()
@@ -267,7 +311,7 @@ def auto_classify_3tier(sender_receiver, memo, r_type, summary_field):
         return '기타소득', '기타수입', '기타'
     return '기타', '예비비', '기타지출'
 
-# 순수 거래 데이터 기반 월별 수지 집계 (고정비 제외)
+# 순수 거래 데이터 기반 월별 수지 요약
 def calculate_monthly_summary(year_filter):
     df_var = get_variable_records(year_filter)
     
@@ -291,7 +335,7 @@ def calculate_monthly_summary(year_filter):
         })
     return pd.DataFrame(summary)
 
-# 3계층 피벗 생성 (대분류-중분류-소분류)
+# 3계층 피벗 생성 (대-중-소 계층별)
 def generate_3tier_pivot(year_filter, r_type='지출'):
     df_var = get_variable_records(year_filter)
     filtered = df_var[df_var['type'] == r_type] if not df_var.empty else pd.DataFrame()
@@ -316,14 +360,13 @@ def generate_3tier_pivot(year_filter, r_type='지출'):
     return pivot
 
 # -------------------------------------------------------------
-# 5. 사이드바 메뉴 및 공통 필터
+# 5. 사이드바 컨트롤 & 분석 년도 선택기
 # -------------------------------------------------------------
-st.sidebar.title("📌 가계부 시스템")
+st.sidebar.markdown("### 💎 SMART LEDGER")
 
-# 년도 필터 선택 (전체 또는 개별 연도)
-all_years = get_available_years()
-year_options = ["전체"] + [str(y) for y in sorted(all_years, reverse=True)]
-selected_year_str = st.sidebar.selectbox("📅 분석 년도 선택", year_options, index=1 if len(year_options) > 1 else 0)
+# 요구사항: 전체, 2026년 ~ 2020년 선택기
+year_options = ["전체", "2026년", "2025년", "2024년", "2023년", "2022년", "2021년", "2020년"]
+selected_year_str = st.sidebar.selectbox("📅 분석년도 선택", year_options, index=1)
 
 menu = st.sidebar.radio(
     "메뉴 선택",
@@ -338,10 +381,11 @@ menu = st.sidebar.radio(
     ]
 )
 
-if st.sidebar.button("🚪 로그아웃"):
+if st.sidebar.button("🚪 시스템 로그아웃"):
     st.session_state.authenticated = False
     st.rerun()
 
+# 엑셀 다운로드
 st.sidebar.divider()
 st.sidebar.subheader("💾 데이터 엑셀 내보내기")
 df_summary_export = calculate_monthly_summary(selected_year_str)
@@ -361,18 +405,18 @@ with pd.ExcelWriter(output, engine='openpyxl') as writer:
     get_3tier_hierarchy().to_excel(writer, sheet_name='3단계분류체계목록', index=False)
 
 st.sidebar.download_button(
-    label=f"[{selected_year_str}년도] 가계부 엑셀 다운로드",
+    label=f"[{selected_year_str}] 가계부 엑셀 다운로드",
     data=output.getvalue(),
-    file_name=f"스마트가계부_{selected_year_str}_통합분석대장.xlsx",
+    file_name=f"스마트가계부_{selected_year_str}_통합분석.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     use_container_width=True
 )
 
 # -------------------------------------------------------------
-# 메뉴 1: 연간 통합 대시보드
+# 메뉴 1: 연간 통합 대시보드 (아이소메트릭 & 글래스모피즘 UI)
 # -------------------------------------------------------------
 if menu == "연간 통합 대시보드":
-    st.title(f"📊 {selected_year_str}년도 수입 / 지출 통합 대시보드")
+    st.title(f"📊 {selected_year_str} 수입 / 지출 통합 대시보드")
     df_summary = calculate_monthly_summary(selected_year_str)
     
     tot_year_inc = df_summary["총 수입"].sum()
@@ -380,20 +424,51 @@ if menu == "연간 통합 대시보드":
     tot_year_sav = df_summary["당월 순저축"].sum()
     avg_sav_rate = (tot_year_sav / tot_year_inc * 100) if tot_year_inc > 0 else 0
     
+    # 아이소메트릭 입체 카드 지표
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("총 수입", f"{tot_year_inc:,} 원")
-    col2.metric("총 지출", f"{tot_year_exp:,} 원")
-    col3.metric("순 저축", f"{tot_year_sav:,} 원")
-    col4.metric("평균 저축률", f"{avg_sav_rate:.1f} %")
-    
+    with col1:
+        st.markdown(f"""
+        <div class="iso-card">
+            <div class="iso-label">💰 총 수입</div>
+            <div class="iso-value val-blue">{tot_year_inc:,} <span style="font-size: 1rem;">원</span></div>
+        </div>
+        """, unsafe_allow_html=True)
+    with col2:
+        st.markdown(f"""
+        <div class="iso-card">
+            <div class="iso-label">💸 총 지출</div>
+            <div class="iso-value val-red">{tot_year_exp:,} <span style="font-size: 1rem;">원</span></div>
+        </div>
+        """, unsafe_allow_html=True)
+    with col3:
+        st.markdown(f"""
+        <div class="iso-card">
+            <div class="iso-label">📈 순 저축</div>
+            <div class="iso-value val-green">{tot_year_sav:,} <span style="font-size: 1rem;">원</span></div>
+        </div>
+        """, unsafe_allow_html=True)
+    with col4:
+        st.markdown(f"""
+        <div class="iso-card">
+            <div class="iso-label">🎯 평균 저축률</div>
+            <div class="iso-value val-amber">{avg_sav_rate:.1f} <span style="font-size: 1rem;">%</span></div>
+        </div>
+        """, unsafe_allow_html=True)
+        
     st.divider()
     
-    # 월별 추이 그래프
+    # 월별 수지 추이 차트
     fig_bar = go.Figure()
-    fig_bar.add_trace(go.Bar(x=df_summary["월"], y=df_summary["총 수입"], name="총 수입", marker_color="#2962FF"))
-    fig_bar.add_trace(go.Bar(x=df_summary["월"], y=df_summary["총 지출"], name="총 지출", marker_color="#FF5252"))
-    fig_bar.add_trace(go.Scatter(x=df_summary["월"], y=df_summary["당월 순저축"], name="순저축", mode="lines+markers", marker_color="#00C853"))
-    fig_bar.update_layout(title=f"{selected_year_str}년도 월별 수입, 지출 및 순저축 추이", barmode="group", hovermode="x unified", margin=dict(l=20, r=20, t=50, b=20))
+    fig_bar.add_trace(go.Bar(x=df_summary["월"], y=df_summary["총 수입"], name="총 수입", marker_color="#38bdf8"))
+    fig_bar.add_trace(go.Bar(x=df_summary["월"], y=df_summary["총 지출"], name="총 지출", marker_color="#f87171"))
+    fig_bar.add_trace(go.Scatter(x=df_summary["월"], y=df_summary["당월 순저축"], name="순저축", mode="lines+markers", marker_color="#4ade80", line=dict(width=3)))
+    fig_bar.update_layout(
+        title=f"{selected_year_str} 월별 수입, 지출 및 순저축 추이",
+        barmode="group",
+        hovermode="x unified",
+        template="plotly_dark",
+        margin=dict(l=20, r=20, t=50, b=20)
+    )
     st.plotly_chart(fig_bar, use_container_width=True)
     
     c1, c2 = st.columns(2)
@@ -401,7 +476,7 @@ if menu == "연간 통합 대시보드":
         df_var_exp = df_var_all[df_var_all['type'] == '지출'] if not df_var_all.empty else pd.DataFrame()
         if not df_var_exp.empty:
             cat_sum = df_var_exp.groupby("cat_large")["amount"].sum().reset_index()
-            fig_pie1 = px.pie(cat_sum, names="cat_large", values="amount", title="지출 대분류별 구성 비중", hole=0.45)
+            fig_pie1 = px.pie(cat_sum, names="cat_large", values="amount", title="지출 대분류별 구성 비중", hole=0.45, template="plotly_dark", color_discrete_sequence=px.colors.sequential.RdBu)
             st.plotly_chart(fig_pie1, use_container_width=True)
         else:
             st.info("등록된 지출 내역이 없습니다.")
@@ -410,26 +485,26 @@ if menu == "연간 통합 대시보드":
         df_var_inc = df_var_all[df_var_all['type'] == '수입'] if not df_var_all.empty else pd.DataFrame()
         if not df_var_inc.empty:
             inc_sum = df_var_inc.groupby("cat_large")["amount"].sum().reset_index()
-            fig_pie2 = px.pie(inc_sum, names="cat_large", values="amount", title="수입 대분류별 구성 비중", hole=0.45, color_discrete_sequence=px.colors.sequential.Blues_r)
+            fig_pie2 = px.pie(inc_sum, names="cat_large", values="amount", title="수입 대분류별 구성 비중", hole=0.45, template="plotly_dark", color_discrete_sequence=px.colors.sequential.Teal)
             st.plotly_chart(fig_pie2, use_container_width=True)
         else:
             st.info("등록된 수입 내역이 없습니다.")
             
-    st.subheader("📑 상세 수지 분석표")
+    st.subheader("📑 월별 수지 분석표")
     st.dataframe(df_summary.style.format({
         "총 수입": "{:,}원", "총 지출": "{:,}원",
         "당월 순저축": "{:,}원", "누적 순저축": "{:,}원", "저축률(%)": "{:.2f}%"
     }), use_container_width=True)
 
 # -------------------------------------------------------------
-# 메뉴 2: 월별 수입/지출 내역 관리 (3단계 연동)
+# 메뉴 2: 월별 수입/지출 내역 관리 (대-중-소 연동)
 # -------------------------------------------------------------
 elif menu == "월별 수입/지출 내역 관리":
     selected_month = st.sidebar.selectbox("조회/관리할 월 선택", [f"{i}월" for i in range(1, 13)])
     month_int = int(selected_month.replace("월", ""))
-    target_year = 2026 if selected_year_str == "전체" else int(selected_year_str)
+    target_year = 2026 if selected_year_str == "전체" else int(selected_year_str.replace("년", ""))
     
-    st.title(f"🗓️ {target_year}년 {selected_month} 가계부 내역 관리")
+    st.title(f"🗓️️ {target_year}년 {selected_month} 가계부 내역 관리")
     
     all_recs = get_variable_records(target_year)
     m_records = all_recs[all_recs["month"] == month_int] if not all_recs.empty else pd.DataFrame()
@@ -438,11 +513,11 @@ elif menu == "월별 수입/지출 내역 관리":
     m_var_exp = m_records[m_records["type"] == "지출"]["amount"].sum() if not m_records.empty else 0
     m_net = m_var_inc - m_var_exp
     
-    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-    kpi1.metric("총 수입", f"{m_var_inc:,} 원")
-    kpi2.metric("총 지출", f"{m_var_exp:,} 원", delta_color="inverse")
-    kpi3.metric("당월 순저축", f"{m_net:,} 원")
-    kpi4.metric("당월 저축률", f"{(m_net/m_var_inc*100):.1f} %" if m_var_inc > 0 else "0 %")
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("총 수입", f"{m_var_inc:,} 원")
+    k2.metric("총 지출", f"{m_var_exp:,} 원", delta_color="inverse")
+    k3.metric("당월 순저축", f"{m_net:,} 원")
+    k4.metric("당월 저축률", f"{(m_net/m_var_inc*100):.1f} %" if m_var_inc > 0 else "0 %")
     
     st.divider()
     
@@ -499,7 +574,7 @@ elif menu == "월별 수입/지출 내역 관리":
                     st.session_state.editing_record_id = None
                     st.rerun()
 
-    # 2) 신규 내역 등록 (대-중-소 연동)
+    # 2) 신규 내역 등록 (대-중-소 단계별 동적 연동)
     st.subheader(f"➕ {target_year}년 {selected_month} 새로운 내역 직접 추가")
     c_y, c_type, c_large, c_mid, c_small = st.columns(5)
     rec_year = c_y.number_input("해당 년도", min_value=2020, max_value=2035, value=target_year, key="add_rec_year")
@@ -507,15 +582,15 @@ elif menu == "월별 수입/지출 내역 관리":
     
     hier_df = get_3tier_hierarchy(rec_type)
     large_list = sorted(hier_df['cat_large'].unique().tolist())
-    rec_large = c_large.selectbox("대분류", large_list, key="add_rec_large")
+    rec_large = c_large.selectbox("대분류 선택", large_list, key="add_rec_large")
     
     mid_list = sorted(hier_df[hier_df['cat_large'] == rec_large]['cat_mid'].unique().tolist())
     if not mid_list: mid_list = ['기타']
-    rec_mid = c_mid.selectbox("중분류", mid_list, key="add_rec_mid")
+    rec_mid = c_mid.selectbox("중분류 선택", mid_list, key="add_rec_mid")
     
     small_list = sorted(hier_df[(hier_df['cat_large'] == rec_large) & (hier_df['cat_mid'] == rec_mid)]['cat_small'].unique().tolist())
     if not small_list: small_list = ['기타']
-    rec_small = c_small.selectbox("소분류", small_list, key="add_rec_small")
+    rec_small = c_small.selectbox("소분류 선택", small_list, key="add_rec_small")
     
     with st.form("add_record_form", clear_on_submit=True):
         col_date, col_name, col_amt, col_btn = st.columns([1.2, 2.5, 2, 1.2])
@@ -549,7 +624,7 @@ elif menu == "월별 수입/지출 내역 관리":
         for idx, row in m_records.iterrows():
             c1, c2, c3, c4, c5, c6, c7, c8, c9, c10 = st.columns([1.0, 0.8, 2.0, 1.5, 1.2, 1.2, 1.2, 0.8, 0.6, 0.6])
             c1.text(f"{row['date']}")
-            c2.markdown(f"<span style='color:{'#2962FF' if row['type']=='수입' else '#FF5252'}; font-weight:bold;'>{row['type']}</span>", unsafe_allow_html=True)
+            c2.markdown(f"<span style='color:{'#38bdf8' if row['type']=='수입' else '#f87171'}; font-weight:bold;'>{row['type']}</span>", unsafe_allow_html=True)
             c3.text(f"{row['name']}")
             c4.text(f"{row['amount']:,} 원")
             c5.text(f"{row['cat_large']}")
@@ -570,17 +645,18 @@ elif menu == "월별 수입/지출 내역 관리":
         st.info("해당 월에 등록된 거래 내역이 없습니다.")
 
 # -------------------------------------------------------------
-# 메뉴 3: 📊 3단계 분류 심층 통계 분석 (통합 & 다차원 대시보드)
+# 메뉴 3: 📊 3단계 분류 심층 통계 분석 (통합 & 개별 뷰)
 # -------------------------------------------------------------
 elif menu == "📊 3단계 분류 심층 통계 분석":
-    st.title(f"📊 {selected_year_str}년도 3단계 분류 심층 통계 분석")
-    st.info("💡 대분류 - 중분류 - 소분류 3단계 계층 구조를 기반으로 다양한 시각화 차트와 피벗 시트를 제공합니다.")
+    st.title(f"📊 {selected_year_str} 3단계 분류 심층 통계 분석")
+    st.info("💡 대분류 ➡️ 중분류 ➡️ 소분류 항목을 선택하여 드릴다운하거나, 다양한 차트 형태로 비교 분석할 수 있습니다.")
     
     df_var = get_variable_records(selected_year_str)
     
     # 뷰 선택 모드
-    view_mode = st.radio("분석 모드 선택", ["💸 지출 3단계 심층 분석", "💰 수입 3단계 심층 분석", "⚖️ 수입/지출 통합 비교 분석"], horizontal=True)
+    view_mode = st.radio("분석 관점 선택", ["💸 지출 3단계 심층 분석", "💰 수입 3단계 심층 분석", "⚖️ 수입/지출 통합 비교 분석"], horizontal=True)
     
+    # 1) 지출 3단계 심층 분석
     if view_mode == "💸 지출 3단계 심층 분석":
         exp_df = df_var[df_var['type'] == '지출'] if not df_var.empty else pd.DataFrame()
         if exp_df.empty:
@@ -600,9 +676,12 @@ elif menu == "📊 3단계 분류 심층 통계 분석":
             
             st.divider()
             
-            # 사용자 차트 선택기
-            st.subheader("🎨 지출 시각화 대시보드 선택")
-            chart_choice = st.selectbox("차트 형태 선택", ["3단계 선버스트 차트 (Sunburst)", "3단계 트리맵 (Treemap)", "중분류별 지출 도넛 차트", "소분류 Top 15 랭킹 바", "월별 × 대분류 지출 히트맵"])
+            # 사용자 맞춤 차트 선택기
+            st.subheader("🎨 지출 인터랙티브 시각화 대시보드")
+            chart_choice = st.selectbox(
+                "차트 형태 선택", 
+                ["3단계 선버스트 차트 (Sunburst)", "3단계 트리맵 (Treemap)", "중분류별 지출 도넛 차트", "소분류 Top 15 랭킹 바", "월별 × 대분류 지출 히트맵"]
+            )
             
             if chart_choice == "3단계 선버스트 차트 (Sunburst)":
                 fig = px.sunburst(
@@ -611,6 +690,7 @@ elif menu == "📊 3단계 분류 심층 통계 분석":
                     values='amount', 
                     title="대분류 ➡️ 중분류 ➡️ 소분류 지출 계층 구조", 
                     color='amount', 
+                    template="plotly_dark",
                     color_continuous_scale='Reds'
                 )
                 st.plotly_chart(fig, use_container_width=True)
@@ -621,23 +701,24 @@ elif menu == "📊 3단계 분류 심층 통계 분석":
                     values='amount', 
                     title="대-중-소 지출 면적 비중 트리맵", 
                     color='amount', 
+                    template="plotly_dark",
                     color_continuous_scale='YlOrRd'
                 )
                 st.plotly_chart(fig, use_container_width=True)
             elif chart_choice == "중분류별 지출 도넛 차트":
                 mid_sum = exp_df.groupby("cat_mid")["amount"].sum().reset_index()
-                fig = px.pie(mid_sum, names="cat_mid", values="amount", title="중분류별 지출 비중", hole=0.45)
+                fig = px.pie(mid_sum, names="cat_mid", values="amount", title="중분류별 지출 비중", hole=0.45, template="plotly_dark")
                 st.plotly_chart(fig, use_container_width=True)
             elif chart_choice == "소분류 Top 15 랭킹 바":
                 small_sum = exp_df.groupby(["cat_large", "cat_mid", "cat_small"])["amount"].sum().reset_index()
                 small_sum["계층표시"] = small_sum["cat_large"] + " > " + small_sum["cat_mid"] + " > " + small_sum["cat_small"]
                 small_sum = small_sum.sort_values(by="amount", ascending=True).tail(15)
-                fig = px.bar(small_sum, x="amount", y="계층표시", orientation='h', text="amount", color="amount", color_continuous_scale="Purples", title="소분류 누적 지출 Top 15")
+                fig = px.bar(small_sum, x="amount", y="계층표시", orientation='h', text="amount", color="amount", template="plotly_dark", color_continuous_scale="Purples", title="소분류 누적 지출 Top 15")
                 fig.update_traces(texttemplate='%{text:,}원', textposition='outside')
                 st.plotly_chart(fig, use_container_width=True)
             elif chart_choice == "월별 × 대분류 지출 히트맵":
                 pivot_heat = exp_df.pivot_table(index='cat_large', columns='month', values='amount', aggfunc='sum', fill_value=0)
-                fig = px.imshow(pivot_heat, labels=dict(x="월", y="대분류", color="지출액"), aspect="auto", color_continuous_scale="Reds", title="대분류별 월별 지출 집중도 히트맵")
+                fig = px.imshow(pivot_heat, labels=dict(x="월", y="대분류", color="지출액"), aspect="auto", template="plotly_dark", color_continuous_scale="Reds", title="대분류별 월별 지출 집중도 히트맵")
                 st.plotly_chart(fig, use_container_width=True)
                 
             # 3단계 피벗 시트
@@ -646,6 +727,7 @@ elif menu == "📊 3단계 분류 심층 통계 분석":
             fmt = {col: "{:,}원" for col in exp_pivot.columns if col not in ['대분류', '중분류', '소분류']}
             st.dataframe(exp_pivot.style.format(fmt), use_container_width=True)
 
+    # 2) 수입 3단계 심층 분석
     elif view_mode == "💰 수입 3단계 심층 분석":
         inc_df = df_var[df_var['type'] == '수입'] if not df_var.empty else pd.DataFrame()
         if inc_df.empty:
@@ -666,10 +748,10 @@ elif menu == "📊 3단계 분류 심층 통계 분석":
             
             col_i1, col_i2 = st.columns(2)
             with col_i1:
-                fig_inc_sun = px.sunburst(inc_df, path=['cat_large', 'cat_mid', 'cat_small'], values='amount', title="수입 계층 선버스트 차트", color='amount', color_continuous_scale='Blues')
+                fig_inc_sun = px.sunburst(inc_df, path=['cat_large', 'cat_mid', 'cat_small'], values='amount', title="수입 계층 선버스트 차트", color='amount', template="plotly_dark", color_continuous_scale='Blues')
                 st.plotly_chart(fig_inc_sun, use_container_width=True)
             with col_i2:
-                inc_tree = px.treemap(inc_df, path=['cat_large', 'cat_mid', 'cat_small'], values='amount', title="수입 트리맵 구조", color='amount', color_continuous_scale='Teal')
+                inc_tree = px.treemap(inc_df, path=['cat_large', 'cat_mid', 'cat_small'], values='amount', title="수입 트리맵 구조", color='amount', template="plotly_dark", color_continuous_scale='Teal')
                 st.plotly_chart(inc_tree, use_container_width=True)
                 
             st.subheader("📑 [수입] 대분류 - 중분류 - 소분류 월별 상세 피벗 테이블")
@@ -677,9 +759,9 @@ elif menu == "📊 3단계 분류 심층 통계 분석":
             fmt_i = {col: "{:,}원" for col in inc_pivot.columns if col not in ['대분류', '중분류', '소분류']}
             st.dataframe(inc_pivot.style.format(fmt_i), use_container_width=True)
 
+    # 3) 수입 vs 지출 통합 비교 뷰
     else:
-        # 통합 비교 뷰
-        st.subheader("⚖️️ 수입 vs 지출 통합 대분류 비교 분석")
+        st.subheader("⚖️ 수입 vs 지출 통합 대분류 비교 분석")
         if not df_var.empty:
             type_cat_sum = df_var.groupby(["type", "cat_large"])["amount"].sum().reset_index()
             fig_compare = px.bar(
@@ -689,32 +771,34 @@ elif menu == "📊 3단계 분류 심층 통계 분석":
                 color="type", 
                 barmode="group",
                 title="수입 및 지출 대분류별 금액 비교",
-                color_discrete_map={"수입": "#2962FF", "지출": "#FF5252"}
+                template="plotly_dark",
+                color_discrete_map={"수입": "#38bdf8", "지출": "#f87171"}
             )
             fig_compare.update_traces(texttemplate='%{y:,}원', textposition='outside')
             st.plotly_chart(fig_compare, use_container_width=True)
             
-            if selected_year_str == "전체":
-                st.subheader("📅 연도별(Year-over-Year) 수입/지출 총액 추이")
-                yoy_df = df_var.groupby(["year", "type"])["amount"].sum().reset_index()
-                fig_yoy = px.bar(
-                    yoy_df, 
-                    x="year", 
-                    y="amount", 
-                    color="type", 
-                    barmode="group",
-                    title="연도별 수입 및 지출 규모 변동 추이",
-                    color_discrete_map={"수입": "#2962FF", "지출": "#FF5252"}
-                )
-                fig_yoy.update_traces(texttemplate='%{y:,}원', textposition='outside')
-                st.plotly_chart(fig_yoy, use_container_width=True)
+            # 연도별 추이 (전체 선택 시 표출)
+            st.subheader("📅 연도별(Year-over-Year) 수입/지출 총액 추이")
+            yoy_df = df_var.groupby(["year", "type"])["amount"].sum().reset_index()
+            fig_yoy = px.bar(
+                yoy_df, 
+                x="year", 
+                y="amount", 
+                color="type", 
+                barmode="group",
+                title="연도별 수입 및 지출 규모 변동 추이",
+                template="plotly_dark",
+                color_discrete_map={"수입": "#38bdf8", "지출": "#f87171"}
+            )
+            fig_yoy.update_traces(texttemplate='%{y:,}원', textposition='outside')
+            st.plotly_chart(fig_yoy, use_container_width=True)
 
 # -------------------------------------------------------------
 # 메뉴 4: 🏦 KB 국민은행 거래내역 엑셀 연동
 # -------------------------------------------------------------
 elif menu == "🏦 KB 거래내역 엑셀 연동":
     st.title("🏦 KB국민은행 거래내역 엑셀 자동 연동 (3단계)")
-    st.info("국민은행 거래내역 엑셀 파일을 업로드하면 3단계 규칙(대분류-중분류-소분류)에 따라 100% 자동 매핑됩니다.")
+    st.info("국민은행 거래내역 엑셀 파일(`.xls` 또는 `.xlsx`)을 업로드하면 연도와 월이 자동 인식되며, 3단계 규칙에 따라 100% 자동 매핑됩니다.")
 
     uploaded_file = st.file_uploader("KB국민은행 거래내역 엑셀 파일 업로드", type=["xls", "xlsx"])
     
@@ -819,7 +903,7 @@ elif menu == "🏦 KB 거래내역 엑셀 연동":
 # -------------------------------------------------------------
 elif menu == "⚙️ 지능형 자동분류 규칙 관리":
     st.title("⚙️ KB 지능형 자동 분류 규칙(키워드) 관리")
-    st.info("💡 키워드를 등록하면 국민은행 엑셀을 업로드할 때 [대분류 > 중분류 > 소분류]로 100% 자동 매핑됩니다.")
+    st.info("💡 키워드를 등록하면 국민은행 엑셀을 업로드할 때 지정한 [대분류 > 중분류 > 소분류]로 100% 자동 매핑됩니다.")
     
     rules_df = get_auto_rules_3tier()
     col_r_add, col_r_list = st.columns([1, 1.5])
