@@ -9,7 +9,7 @@ import io
 # 1. 페이지 설정
 # -------------------------------------------------------------
 st.set_page_config(
-    page_title="스마트 가계부 & 대/소분류 자산 분석 시스템",
+    page_title="스마트 가계부 & 3단계 분류 다차원 분석 시스템",
     page_icon="💰",
     layout="wide"
 )
@@ -22,13 +22,13 @@ def get_db_connection():
     return conn
 
 # -------------------------------------------------------------
-# 2. SQLite DB 초기화 및 안전 마이그레이션
+# 2. SQLite DB 초기화 및 3단계 자동 마이그레이션 (고정항목 배제)
 # -------------------------------------------------------------
 def init_db():
     conn = get_db_connection()
     cur = conn.cursor()
     
-    # 0) 시스템 설정 (비밀번호)
+    # 0) 시스템 설정
     cur.execute("""
     CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
@@ -38,128 +38,138 @@ def init_db():
     if cur.fetchone() is None:
         cur.execute("INSERT INTO settings (key, value) VALUES ('app_password', '1234')")
     
-    # 1) 대분류-소분류 관리 테이블
+    # 1) 대분류 - 중분류 - 소분류 3단계 마스터 테이블
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS category_hierarchy (
+    CREATE TABLE IF NOT EXISTS category_hierarchy_3tier (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         type TEXT, -- '수입' or '지출'
-        category TEXT, -- 대분류
-        sub_category TEXT, -- 소분류
-        UNIQUE(type, category, sub_category)
+        cat_large TEXT, -- 대분류
+        cat_mid TEXT,   -- 중분류
+        cat_small TEXT, -- 소분류
+        UNIQUE(type, cat_large, cat_mid, cat_small)
     )""")
     
-    # 2) 고정 수입/지출 항목
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS fixed_items (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        type TEXT,
-        name TEXT,
-        amount INTEGER,
-        payment_method TEXT,
-        category TEXT DEFAULT '고정비',
-        sub_category TEXT DEFAULT '기타'
-    )""")
-    
-    # 3) 거래 내역 테이블
+    # 2) 거래 내역 테이블 (년도 컬럼 및 3단계 분류 포함)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS variable_records (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        year INTEGER DEFAULT 2026,
         month INTEGER,
         type TEXT,
         date TEXT,
         time TEXT DEFAULT '',
         name TEXT,
         amount INTEGER,
-        category TEXT,
-        sub_category TEXT DEFAULT '기타',
+        cat_large TEXT DEFAULT '기타',
+        cat_mid TEXT DEFAULT '기타',
+        cat_small TEXT DEFAULT '기타',
         memo TEXT DEFAULT '',
         source TEXT DEFAULT '수기'
     )""")
     
-    # 4) 지능형 자동 분류 규칙 (대분류 + 소분류 연계)
+    # 3) 지능형 자동 분류 규칙 (3단계 연동)
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS auto_rules (
+    CREATE TABLE IF NOT EXISTS auto_rules_3tier (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         rule_type TEXT DEFAULT '지출',
-        category TEXT,
-        sub_category TEXT,
+        cat_large TEXT,
+        cat_mid TEXT,
+        cat_small TEXT,
         keyword TEXT UNIQUE
     )""")
     conn.commit()
 
-    # --- 기존 DB 테이블 컬럼 자동 마이그레이션 ---
+    # --- 기존 테이블 마이그레이션 (누락 컬럼 자동 추가) ---
     cur.execute("PRAGMA table_info(variable_records)")
     v_cols = [row[1] for row in cur.fetchall()]
+    if "year" not in v_cols: cur.execute("ALTER TABLE variable_records ADD COLUMN year INTEGER DEFAULT 2026")
+    if "cat_large" not in v_cols: cur.execute("ALTER TABLE variable_records ADD COLUMN cat_large TEXT DEFAULT '기타'")
+    if "cat_mid" not in v_cols: cur.execute("ALTER TABLE variable_records ADD COLUMN cat_mid TEXT DEFAULT '기타'")
+    if "cat_small" not in v_cols: cur.execute("ALTER TABLE variable_records ADD COLUMN cat_small TEXT DEFAULT '기타'")
     if "time" not in v_cols: cur.execute("ALTER TABLE variable_records ADD COLUMN time TEXT DEFAULT ''")
-    if "sub_category" not in v_cols: cur.execute("ALTER TABLE variable_records ADD COLUMN sub_category TEXT DEFAULT '기타'")
     if "memo" not in v_cols: cur.execute("ALTER TABLE variable_records ADD COLUMN memo TEXT DEFAULT ''")
     if "source" not in v_cols: cur.execute("ALTER TABLE variable_records ADD COLUMN source TEXT DEFAULT '수기'")
-    
-    cur.execute("PRAGMA table_info(auto_rules)")
-    r_cols = [row[1] for row in cur.fetchall()]
-    if "sub_category" not in r_cols: cur.execute("ALTER TABLE auto_rules ADD COLUMN sub_category TEXT DEFAULT '기타'")
     conn.commit()
 
-    # 기본 대/소분류 카테고리 주입
-    cur.execute("SELECT COUNT(*) FROM category_hierarchy")
+    # 기본 3계층 카테고리 시드 데이터 주입
+    cur.execute("SELECT COUNT(*) FROM category_hierarchy_3tier")
     if cur.fetchone()[0] == 0:
-        base_hierarchy = [
-            # 수입 체계
-            ('수입', '급여', '본인급여'), ('수입', '급여', '배우자급여'), ('수입', '급여', '상여금/성과급'),
-            ('수입', '금융수입', '이자수익'), ('수입', '금융수입', '배당금'),
-            ('수입', '기타수입', '환급금/공제'), ('수입', '기타수입', '중고판매'), ('수입', '기타수입', '용돈/지원금'), ('수입', '기타수입', '기타'),
-            # 지출 체계
-            ('지출', '식비', '식자재/마트'), ('지출', '식비', '간식/가공식품'),
-            ('지출', '외식', '음식점/외식'), ('지출', '외식', '카페/디저트'), ('지출', '외식', '배달음식'),
-            ('지출', '교통', '주유비'), ('지출', '교통', '대중교통'), ('지출', '교통', '통행료/하이패스'), ('지출', '교통', '택시비'),
-            ('지출', '차량', '차량정비/부품'), ('지출', '차량', '세차/주차료'),
-            ('지출', '금융/주거', '주택담보대출'), ('지출', '금융/주거', '관리비/공과금'), ('지출', '금융/주거', '보험료'), ('지출', '금융/주거', '카드대금'), ('지출', '금융/주거', '대출이자'),
-            ('지출', '생활', '생필품'), ('지출', '생활', '통신비/인터넷'), ('지출', '생활', '정기구독료'),
-            ('지출', '쇼핑', '의류/잡화'), ('지출', '쇼핑', '온라인쇼핑'), ('지출', '쇼핑', '가전/가구'),
-            ('지출', '의료', '병원진료'), ('지출', '의료', '약국'), ('지출', '의료', '동물병원'),
-            ('지출', '교육', '학원비'), ('지출', '교육', '도서/문구'),
-            ('지출', '문화/여가', '영화/공연'), ('지출', '문화/여가', '여행/숙박'), ('지출', '문화/여가', '운동/레저'),
-            ('지출', '경조/기부', '기부금/후원'), ('지출', '경조/기부', '경조사비'), ('지출', '기타', '기타지출')
+        base_3tier = [
+            # 수입 (대 > 중 > 소)
+            ('수입', '근로소득', '정기급여', '본인급여'), ('수입', '근로소득', '정기급여', '배우자급여'),
+            ('수입', '근로소득', '성과/상여', '명절상여'), ('수입', '근로소득', '성과/상여', '회사성과급'),
+            ('수입', '금융/투자', '이자수익', '예적금이자'), ('수입', '금융/투자', '배당수익', '국내외배당'),
+            ('수입', '기타소득', '부수입', '중고거래'), ('수입', '기타소득', '부수입', '원고료/자문료'),
+            ('수입', '기타소득', '환급/지원', '연말정산환급'), ('수입', '기타소득', '환급/지원', '정부지원금'),
+            # 지출 (대 > 중 > 소)
+            ('지출', '생활필수', '식비/장보기', '마트/농협'), ('지출', '생활필수', '식비/장보기', '정육/청과'), ('지출', '생활필수', '식비/장보기', '간식/생필품'),
+            ('지출', '생활필수', '주거/통신', '관리비/공과금'), ('지출', '생활필수', '주거/통신', '통신비/인터넷'), ('지출', '생활필수', '주거/통신', '도시가스/난방'),
+            ('지출', '생활필수', '보건/의료', '병원진료'), ('지출', '생활필수', '보건/의료', '약국처방'), ('지출', '생활필수', '보건/의료', '동물병원'),
+            ('지출', '외식/여가', '외식/식도락', '음식점/식당'), ('지출', '외식/여가', '외식/식도락', '카페/디저트'), ('지출', '외식/여가', '외식/식도락', '배달음식'),
+            ('지출', '외식/여가', '문화/여행', '영화/공연'), ('지출', '외식/여가', '문화/여행', '여행/숙박'), ('지출', '외식/여가', '문화/여행', '운동/피트니스'),
+            ('지출', '차량/교통', '차량유지', '주유비'), ('지출', '차량/교통', '차량유지', '정비/소모품'), ('지출', '차량/교통', '차량유지', '세차/주차료'),
+            ('지출', '차량/교통', '교통이용', '통행료/하이패스'), ('지출', '차량/교통', '교통이용', '대중교통/기차'), ('지출', '차량/교통', '교통이용', '택시비'),
+            ('지출', '금융/안전망', '대출/상환', '주택담보대출'), ('지출', '금융/안전망', '대출/상환', '신용대출이자'),
+            ('지출', '금융/안전망', '보험료', '실손/통합보험'), ('지출', '금융/안전망', '보험료', '자동차보험'),
+            ('지출', '금융/안전망', '카드대금', '신용카드일시불'),
+            ('지출', '쇼핑/잡화', '의류/미용', '의류/신발'), ('지출', '쇼핑/잡화', '온라인쇼핑', '쿠팡/네이버페이'),
+            ('지출', '사회/기부', '경조사', '축의/부의금'), ('지출', '사회/기부', '기부/후원', '정기후원금'),
+            ('지출', '기타', '예비비', '기타지출')
         ]
-        cur.executemany("INSERT OR IGNORE INTO category_hierarchy (type, category, sub_category) VALUES (?, ?, ?)", base_hierarchy)
+        cur.executemany("INSERT OR IGNORE INTO category_hierarchy_3tier (type, cat_large, cat_mid, cat_small) VALUES (?, ?, ?, ?)", base_3tier)
 
-    # 기본 고정 지출/수입
-    cur.execute("SELECT COUNT(*) FROM fixed_items")
-    if cur.fetchone()[0] == 0:
-        base_fixed = [
-            ('수입', '본인 급여', 4800000, '-', '급여', '본인급여'),
-            ('수입', '배우자 급여', 1200000, '-', '급여', '배우자급여'),
-            ('지출', '주택담보대출', 1100000, '자동이체', '금융/주거', '주택담보대출'),
-            ('지출', '관리비/공과금', 280000, '자동이체', '금융/주거', '관리비/공과금'),
-            ('지출', '보험료(통합)', 320000, '카드납부', '금융/주거', '보험료'),
-            ('지출', '통신비/인터넷', 150000, '자동이체', '생활', '통신비/인터넷'),
-            ('지출', '정기구독료', 45000, '카드결제', '생활', '정기구독료')
-        ]
-        cur.executemany("INSERT INTO fixed_items (type, name, amount, payment_method, category, sub_category) VALUES (?, ?, ?, ?, ?, ?)", base_fixed)
-
-    # 기본 자동 분류 규칙 주입 (소분류 매핑 포함)
-    cur.execute("SELECT COUNT(*) FROM auto_rules")
+    # 기본 3계층 자동 분류 규칙 주입
+    cur.execute("SELECT COUNT(*) FROM auto_rules_3tier")
     if cur.fetchone()[0] == 0:
         base_rules = [
-            ('수입', '급여', '본인급여', '천안논산고속도로'), ('수입', '급여', '본인급여', '급여'), ('수입', '급여', '본인급여', '월급'), ('수입', '급여', '상여금/성과급', '상여'), ('수입', '급여', '상여금/성과급', '성과급'),
-            ('수입', '금융수입', '이자수익', '이자'), ('수입', '금융수입', '배당금', '배당'),
-            ('수입', '기타수입', '환급금/공제', '환급'), ('수입', '기타수입', '중고판매', '중고'),
-            ('지출', '경조/기부', '기부금/후원', '홀트'), ('지출', '경조/기부', '기부금/후원', '국경없는의사회'), ('지출', '경조/기부', '기부금/후원', '유니세프'), ('지출', '경조/기부', '기부금/후원', '후원'),
-            ('지출', '금융/주거', '카드대금', '국민카드'), ('지출', '금융/주거', '카드대금', '신한카드'), ('지출', '금융/주거', '카드대금', '삼성카드'), ('지출', '금융/주거', '카드대금', '현대카드'),
-            ('지출', '금융/주거', '보험료', '보험'), ('지출', '금융/주거', '보험료', '생명'), ('지출', '금융/주거', '보험료', '화재'), ('지출', '금융/주거', '대출이자', '대출이자'),
-            ('지출', '식비', '식자재/마트', '마트'), ('지출', '식비', '식자재/마트', '하나로'), ('지출', '식비', '식자재/마트', '농협'), ('지출', '식비', '식자재/마트', '이마트'), ('지출', '식비', '식자재/마트', '홈플러스'), ('지출', '식비', '식자재/마트', '파머스'),
-            ('지출', '외식', '카페/디저트', '카페'), ('지출', '외식', '카페/디저트', '이디야'), ('지출', '외식', '카페/디저트', '스타벅스'), ('지출', '외식', '카페/디저트', '커피'), ('지출', '외식', '카페/디저트', '회란'), ('지출', '외식', '카페/디저트', '디저트'),
-            ('지출', '외식', '음식점/외식', '식당'), ('지출', '외식', '음식점/외식', '음식점'), ('지출', '외식', '음식점/외식', '휴게소'), ('지출', '외식', '음식점/외식', '치킨'),
-            ('지출', '교통', '주유비', '주유소'), ('지출', '교통', '주유비', '오일'), ('지출', '교통', '통행료/하이패스', '하이패스'), ('지출', '교통', '통행료/하이패스', '통행료'), ('지출', '교통', '대중교통', '코레일'), ('지출', '교통', '대중교통', 'srt'), ('지출', '교통', '택시비', '택시'),
-            ('지출', '차량', '차량정비/부품', '정비'), ('지출', '차량', '차량정비/부품', '카센터'), ('지출', '차량', '세차/주차료', '세차'), ('지출', '차량', '세차/주차료', '주차'),
-            ('지출', '의료', '병원진료', '병원'), ('지출', '의료', '약국', '약국'), ('지출', '의료', '병원진료', '의원'), ('지출', '의료', '병원진료', '치과'), ('지출', '의료', '동물병원', '동물병원'),
-            ('지출', '교육', '학원비', '학원'), ('지출', '교육', '도서/문구', '서점'), ('지출', '교육', '도서/문구', '도서'),
-            ('지출', '쇼핑', '생필품', '다이소'), ('지출', '쇼핑', '온라인쇼핑', '쿠팡'), ('지출', '쇼핑', '온라인쇼핑', '네이버페이'),
-            ('지출', '생활', '관리비/공과금', '관리비'), ('지출', '생활', '관리비/공과금', '도시가스'), ('지출', '생활', '관리비/공과금', '전기요금'), ('지출', '생활', '통신비/인터넷', '통신'),
-            ('지출', '문화/여가', '영화/공연', '영화'), ('지출', '문화/여가', '영화/공연', 'cgv'), ('지출', '문화/여가', '여행/숙박', '호텔'), ('지출', '문화/여가', '운동/레저', '골프'),
-            ('지출', '경조/기부', '경조사비', '축의'), ('지출', '경조/기부', '경조사비', '부의')
+            ('수입', '근로소득', '정기급여', '본인급여', '천안논산고속도로'),
+            ('수입', '근로소득', '정기급여', '본인급여', '급여'),
+            ('수입', '근로소득', '정기급여', '본인급여', '월급'),
+            ('수입', '근로소득', '성과/상여', '회사성과급', '성과급'),
+            ('수입', '근로소득', '성과/상여', '명절상여', '상여'),
+            ('수입', '금융/투자', '이자수익', '예적금이자', '이자'),
+            ('수입', '금융/투자', '배당수익', '국내외배당', '배당'),
+            ('수입', '기타소득', '환급/지원', '연말정산환급', '환급'),
+            ('수입', '기타소득', '부수입', '중고거래', '중고'),
+            ('지출', '사회/기부', '기부/후원', '정기후원금', '홀트'),
+            ('지출', '사회/기부', '기부/후원', '정기후원금', '국경없는의사회'),
+            ('지출', '사회/기부', '기부/후원', '정기후원금', '유니세프'),
+            ('지출', '금융/안전망', '카드대금', '신용카드일시불', '국민카드'),
+            ('지출', '금융/안전망', '카드대금', '신용카드일시불', '신한카드'),
+            ('지출', '금융/안전망', '카드대금', '신용카드일시불', '삼성카드'),
+            ('지출', '금융/안전망', '카드대금', '신용카드일시불', '현대카드'),
+            ('지출', '금융/안전망', '보험료', '실손/통합보험', '보험'),
+            ('지출', '금융/안전망', '보험료', '실손/통합보험', '생명'),
+            ('지출', '금융/안전망', '보험료', '실손/통합보험', '화재'),
+            ('지출', '금융/안전망', '대출/상환', '신용대출이자', '대출이자'),
+            ('지출', '생활필수', '식비/장보기', '마트/농협', '마트'),
+            ('지출', '생활필수', '식비/장보기', '마트/농협', '하나로'),
+            ('지출', '생활필수', '식비/장보기', '마트/농협', '농협'),
+            ('지출', '생활필수', '식비/장보기', '마트/농협', '이마트'),
+            ('지출', '생활필수', '식비/장보기', '마트/농협', '파머스'),
+            ('지출', '외식/여가', '외식/식도락', '카페/디저트', '카페'),
+            ('지출', '외식/여가', '외식/식도락', '카페/디저트', '이디야'),
+            ('지출', '외식/여가', '외식/식도락', '카페/디저트', '스타벅스'),
+            ('지출', '외식/여가', '외식/식도락', '카페/디저트', '회란'),
+            ('지출', '외식/여가', '외식/식도락', '음식점/식당', '식당'),
+            ('지출', '외식/여가', '외식/식도락', '음식점/식당', '휴게소'),
+            ('지출', '차량/교통', '차량유지', '주유비', '주유소'),
+            ('지출', '차량/교통', '차량유지', '주유비', '오일'),
+            ('지출', '차량/교통', '교통이용', '통행료/하이패스', '하이패스'),
+            ('지출', '차량/교통', '교통이용', '통행료/하이패스', '통행료'),
+            ('지출', '차량/교통', '교통이용', '대중교통/기차', '코레일'),
+            ('지출', '차량/교통', '교통이용', '대중교통/기차', 'srt'),
+            ('지출', '차량/교통', '교통이용', '택시비', '택시'),
+            ('지출', '차량/교통', '차량유지', '정비/소모품', '정비'),
+            ('지출', '차량/교통', '차량유지', '세차/주차료', '세차'),
+            ('지출', '생활필수', '보건/의료', '병원진료', '병원'),
+            ('지출', '생활필수', '보건/의료', '약국처방', '약국'),
+            ('지출', '생활필수', '보건/의료', '동물병원', '동물병원'),
+            ('지출', '쇼핑/잡화', '온라인쇼핑', '쿠팡/네이버페이', '쿠팡'),
+            ('지출', '쇼핑/잡화', '온라인쇼핑', '쿠팡/네이버페이', '네이버페이'),
+            ('지출', '쇼핑/잡화', '의류/미용', '간식/생필품', '다이소')
         ]
-        cur.executemany("INSERT OR IGNORE INTO auto_rules (rule_type, category, sub_category, keyword) VALUES (?, ?, ?, ?)", base_rules)
+        cur.executemany("INSERT OR IGNORE INTO auto_rules_3tier (rule_type, cat_large, cat_mid, cat_small, keyword) VALUES (?, ?, ?, ?, ?)", base_rules)
 
     conn.commit()
     conn.close()
@@ -167,7 +177,7 @@ def init_db():
 init_db()
 
 # -------------------------------------------------------------
-# 3. 비밀번호 관리 및 로그인 게이트웨이
+# 3. 비밀번호 관리 및 인증 게이트웨이
 # -------------------------------------------------------------
 def get_stored_password():
     conn = get_db_connection()
@@ -207,72 +217,66 @@ if not st.session_state.authenticated:
     st.stop()
 
 # -------------------------------------------------------------
-# 4. 데이터베이스 헬퍼 함수
+# 4. 데이터 조회 및 계산 헬퍼 함수
 # -------------------------------------------------------------
-def get_categories_hierarchy(r_type=None):
+def get_3tier_hierarchy(r_type=None):
     conn = get_db_connection()
     if r_type:
-        df = pd.read_sql("SELECT type, category, sub_category FROM category_hierarchy WHERE type=? ORDER BY category, sub_category", conn, params=(r_type,))
+        df = pd.read_sql("SELECT type, cat_large, cat_mid, cat_small FROM category_hierarchy_3tier WHERE type=? ORDER BY cat_large, cat_mid, cat_small", conn, params=(r_type,))
     else:
-        df = pd.read_sql("SELECT type, category, sub_category FROM category_hierarchy ORDER BY type, category, sub_category", conn)
+        df = pd.read_sql("SELECT type, cat_large, cat_mid, cat_small FROM category_hierarchy_3tier ORDER BY type, cat_large, cat_mid, cat_small", conn)
     conn.close()
     return df
 
-def get_fixed_items():
+def get_variable_records(selected_year=None):
     conn = get_db_connection()
-    df = pd.read_sql("SELECT * FROM fixed_items", conn)
+    if selected_year and selected_year != "전체":
+        df = pd.read_sql("SELECT * FROM variable_records WHERE year=? ORDER BY date DESC, time DESC, id DESC", conn, params=(int(selected_year),))
+    else:
+        df = pd.read_sql("SELECT * FROM variable_records ORDER BY year DESC, date DESC, time DESC, id DESC", conn)
     conn.close()
     return df
 
-def get_variable_records():
+def get_available_years():
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("PRAGMA table_info(variable_records)")
-    cols = [r[1] for r in cur.fetchall()]
-    order_clause = "ORDER BY date DESC, time DESC, id DESC" if "time" in cols else "ORDER BY date DESC, id DESC"
-    df = pd.read_sql(f"SELECT * FROM variable_records {order_clause}", conn)
-    if "time" not in df.columns: df["time"] = ""
-    if "sub_category" not in df.columns: df["sub_category"] = "기타"
-    if "memo" not in df.columns: df["memo"] = ""
-    if "source" not in df.columns: df["source"] = "수기"
+    cur.execute("SELECT DISTINCT year FROM variable_records WHERE year IS NOT NULL ORDER BY year DESC")
+    rows = [r[0] for r in cur.fetchall()]
     conn.close()
-    return df
+    if not rows:
+        return [2026]
+    return rows
 
-def get_auto_rules():
+def get_auto_rules_3tier():
     conn = get_db_connection()
-    df = pd.read_sql("SELECT * FROM auto_rules ORDER BY rule_type, category, sub_category, keyword", conn)
+    df = pd.read_sql("SELECT * FROM auto_rules_3tier ORDER BY rule_type, cat_large, cat_mid, cat_small, keyword", conn)
     conn.close()
     return df
 
-def auto_classify_kb_record(sender_receiver, memo, r_type, summary_field):
+def auto_classify_3tier(sender_receiver, memo, r_type, summary_field):
     text = f"{str(sender_receiver)} {str(memo)} {str(summary_field)}".lower()
-    rules_df = get_auto_rules()
+    rules_df = get_auto_rules_3tier()
     
-    filtered_rules = rules_df[rules_df['rule_type'] == r_type]
-    for _, rule in filtered_rules.iterrows():
+    filtered = rules_df[rules_df['rule_type'] == r_type]
+    for _, rule in filtered.iterrows():
         kw = str(rule['keyword']).lower().strip()
         if kw and kw in text:
-            return rule['category'], rule['sub_category']
+            return rule['cat_large'], rule['cat_mid'], rule['cat_small']
             
-    default_cat = '기타수입' if r_type == '수입' else '기타'
-    return default_cat, '기타'
+    if r_type == '수입':
+        return '기타소득', '기타수입', '기타'
+    return '기타', '예비비', '기타지출'
 
-def calculate_monthly_summary():
-    df_fix = get_fixed_items()
-    df_var = get_variable_records()
-    
-    tot_fixed_inc = df_fix[df_fix['type'] == '수입']['amount'].sum() if not df_fix.empty else 0
-    tot_fixed_exp = df_fix[df_fix['type'] == '지출']['amount'].sum() if not df_fix.empty else 0
+# 순수 거래 데이터 기반 월별 수지 집계 (고정비 제외)
+def calculate_monthly_summary(year_filter):
+    df_var = get_variable_records(year_filter)
     
     summary = []
     accumulated_savings = 0
     for m in range(1, 13):
         m_df = df_var[df_var['month'] == m] if not df_var.empty else pd.DataFrame()
-        var_inc = m_df[m_df['type'] == '수입']['amount'].sum() if not m_df.empty else 0
-        var_exp = m_df[m_df['type'] == '지출']['amount'].sum() if not m_df.empty else 0
-        
-        tot_inc = tot_fixed_inc + var_inc
-        tot_exp = tot_fixed_exp + var_exp
+        tot_inc = m_df[m_df['type'] == '수입']['amount'].sum() if not m_df.empty else 0
+        tot_exp = m_df[m_df['type'] == '지출']['amount'].sum() if not m_df.empty else 0
         net_savings = tot_inc - tot_exp
         accumulated_savings += net_savings
         savings_rate = (net_savings / tot_inc * 100) if tot_inc > 0 else 0
@@ -281,53 +285,55 @@ def calculate_monthly_summary():
             "월": f"{m}월",
             "총 수입": tot_inc,
             "총 지출": tot_exp,
-            "고정 지출": tot_fixed_exp,
-            "변동 지출": var_exp,
             "당월 순저축": net_savings,
             "누적 순저축": accumulated_savings,
             "저축률(%)": round(savings_rate, 2)
         })
     return pd.DataFrame(summary)
 
-# 2계층 피벗 생성 함수 (대분류-소분류)
-def generate_detailed_pivot(r_type='지출'):
-    df_var = get_variable_records()
-    filtered_df = df_var[df_var['type'] == r_type] if not df_var.empty else pd.DataFrame()
+# 3계층 피벗 생성 (대분류-중분류-소분류)
+def generate_3tier_pivot(year_filter, r_type='지출'):
+    df_var = get_variable_records(year_filter)
+    filtered = df_var[df_var['type'] == r_type] if not df_var.empty else pd.DataFrame()
     
-    if filtered_df.empty:
-        return pd.DataFrame(columns=['대분류', '소분류'] + [f"{i}월" for i in range(1, 13)] + ['연간 합계'])
+    if filtered.empty:
+        return pd.DataFrame(columns=['대분류', '중분류', '소분류'] + [f"{i}월" for i in range(1, 13)] + ['연간 합계'])
     
-    pivot = filtered_df.pivot_table(
-        index=['category', 'sub_category'], 
+    pivot = filtered.pivot_table(
+        index=['cat_large', 'cat_mid', 'cat_small'], 
         columns='month', 
         values='amount', 
         aggfunc='sum', 
         fill_value=0
     )
     for m in range(1, 13):
-        if m not in pivot.columns:
-            pivot[m] = 0
+        if m not in pivot.columns: pivot[m] = 0
     pivot = pivot[[m for m in range(1, 13)]]
     pivot.columns = [f"{m}월" for m in range(1, 13)]
     pivot['연간 합계'] = pivot.sum(axis=1)
     pivot = pivot.sort_values(by='연간 합계', ascending=False).reset_index()
-    pivot = pivot.rename(columns={'category': '대분류', 'sub_category': '소분류'})
+    pivot = pivot.rename(columns={'cat_large': '대분류', 'cat_mid': '중분류', 'cat_small': '소분류'})
     return pivot
 
 # -------------------------------------------------------------
-# 5. 사이드바 메뉴 및 백업
+# 5. 사이드바 메뉴 및 공통 필터
 # -------------------------------------------------------------
 st.sidebar.title("📌 가계부 시스템")
+
+# 년도 필터 선택 (전체 또는 개별 연도)
+all_years = get_available_years()
+year_options = ["전체"] + [str(y) for y in sorted(all_years, reverse=True)]
+selected_year_str = st.sidebar.selectbox("📅 분석 년도 선택", year_options, index=1 if len(year_options) > 1 else 0)
+
 menu = st.sidebar.radio(
     "메뉴 선택",
     [
         "연간 통합 대시보드", 
         "월별 수입/지출 내역 관리", 
-        "📊 대/소분류 심층 통계 분석", 
+        "📊 3단계 분류 심층 통계 분석", 
         "🏦 KB 거래내역 엑셀 연동", 
         "⚙️ 지능형 자동분류 규칙 관리", 
-        "고정 수입/지출 관리", 
-        "🏷️ 대/소분류 체계 설정",
+        "🏷️ 대/중/소분류 체계 관리",
         "🔒 비밀번호 변경"
     ]
 )
@@ -338,29 +344,26 @@ if st.sidebar.button("🚪 로그아웃"):
 
 st.sidebar.divider()
 st.sidebar.subheader("💾 데이터 엑셀 내보내기")
-df_summary_export = calculate_monthly_summary()
-df_var_all = get_variable_records()
-df_fix_all = get_fixed_items()
-df_exp_pivot = generate_detailed_pivot('지출')
-df_inc_pivot = generate_detailed_pivot('수입')
-df_rules_export = get_auto_rules()
-df_hier_export = get_categories_hierarchy()
+df_summary_export = calculate_monthly_summary(selected_year_str)
+df_var_all = get_variable_records(selected_year_str)
+df_exp_pivot = generate_3tier_pivot(selected_year_str, '지출')
+df_inc_pivot = generate_3tier_pivot(selected_year_str, '수입')
+df_rules_export = get_auto_rules_3tier()
 
 output = io.BytesIO()
 with pd.ExcelWriter(output, engine='openpyxl') as writer:
     df_summary_export.to_excel(writer, sheet_name='연간수지요약', index=False)
-    df_exp_pivot.to_excel(writer, sheet_name='지출_대소분류_월별통계', index=False)
-    df_inc_pivot.to_excel(writer, sheet_name='수입_대소분류_월별통계', index=False)
+    df_exp_pivot.to_excel(writer, sheet_name='지출_3단계_월별통계', index=False)
+    df_inc_pivot.to_excel(writer, sheet_name='수입_3단계_월별통계', index=False)
     if not df_var_all.empty:
         df_var_all.to_excel(writer, sheet_name='거래내역전체', index=False)
-    df_fix_all.to_excel(writer, sheet_name='고정항목설정', index=False)
     df_rules_export.to_excel(writer, sheet_name='자동분류_키워드규칙', index=False)
-    df_hier_export.to_excel(writer, sheet_name='대소분류체계목록', index=False)
+    get_3tier_hierarchy().to_excel(writer, sheet_name='3단계분류체계목록', index=False)
 
 st.sidebar.download_button(
-    label="현재 가계부 엑셀 다운로드",
+    label=f"[{selected_year_str}년도] 가계부 엑셀 다운로드",
     data=output.getvalue(),
-    file_name="스마트가계부_연간_통합분석대장.xlsx",
+    file_name=f"스마트가계부_{selected_year_str}_통합분석대장.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     use_container_width=True
 )
@@ -369,8 +372,8 @@ st.sidebar.download_button(
 # 메뉴 1: 연간 통합 대시보드
 # -------------------------------------------------------------
 if menu == "연간 통합 대시보드":
-    st.title("📊 연간 수입 / 지출 통합 대시보드")
-    df_summary = calculate_monthly_summary()
+    st.title(f"📊 {selected_year_str}년도 수입 / 지출 통합 대시보드")
+    df_summary = calculate_monthly_summary(selected_year_str)
     
     tot_year_inc = df_summary["총 수입"].sum()
     tot_year_exp = df_summary["총 지출"].sum()
@@ -378,72 +381,68 @@ if menu == "연간 통합 대시보드":
     avg_sav_rate = (tot_year_sav / tot_year_inc * 100) if tot_year_inc > 0 else 0
     
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("연간 총수입", f"{tot_year_inc:,} 원")
-    col2.metric("연간 총지출", f"{tot_year_exp:,} 원")
-    col3.metric("연간 순저축", f"{tot_year_sav:,} 원")
-    col4.metric("연간 평균 저축률", f"{avg_sav_rate:.1f} %")
+    col1.metric("총 수입", f"{tot_year_inc:,} 원")
+    col2.metric("총 지출", f"{tot_year_exp:,} 원")
+    col3.metric("순 저축", f"{tot_year_sav:,} 원")
+    col4.metric("평균 저축률", f"{avg_sav_rate:.1f} %")
     
     st.divider()
     
+    # 월별 추이 그래프
     fig_bar = go.Figure()
     fig_bar.add_trace(go.Bar(x=df_summary["월"], y=df_summary["총 수입"], name="총 수입", marker_color="#2962FF"))
     fig_bar.add_trace(go.Bar(x=df_summary["월"], y=df_summary["총 지출"], name="총 지출", marker_color="#FF5252"))
     fig_bar.add_trace(go.Scatter(x=df_summary["월"], y=df_summary["당월 순저축"], name="순저축", mode="lines+markers", marker_color="#00C853"))
-    fig_bar.update_layout(title="월별 수입, 지출 및 순저축 추이", barmode="group", hovermode="x unified", margin=dict(l=20, r=20, t=50, b=20))
+    fig_bar.update_layout(title=f"{selected_year_str}년도 월별 수입, 지출 및 순저축 추이", barmode="group", hovermode="x unified", margin=dict(l=20, r=20, t=50, b=20))
     st.plotly_chart(fig_bar, use_container_width=True)
     
     c1, c2 = st.columns(2)
     with c1:
-        exp_comp = pd.DataFrame({
-            "구분": ["고정 지출", "변동 지출"],
-            "금액": [df_summary["고정 지출"].sum(), df_summary["변동 지출"].sum()]
-        })
-        fig_pie1 = px.pie(exp_comp, names="구분", values="금액", title="고정 지출 vs 변동 지출 비율", hole=0.45, color_discrete_sequence=["#FF7043", "#FFA726"])
-        st.plotly_chart(fig_pie1, use_container_width=True)
-        
-    with c2:
         df_var_exp = df_var_all[df_var_all['type'] == '지출'] if not df_var_all.empty else pd.DataFrame()
         if not df_var_exp.empty:
-            cat_sum = df_var_exp.groupby("category")["amount"].sum().reset_index()
-            fig_pie2 = px.pie(cat_sum, names="category", values="amount", title="대분류별 지출 비중", hole=0.45)
-            st.plotly_chart(fig_pie2, use_container_width=True)
+            cat_sum = df_var_exp.groupby("cat_large")["amount"].sum().reset_index()
+            fig_pie1 = px.pie(cat_sum, names="cat_large", values="amount", title="지출 대분류별 구성 비중", hole=0.45)
+            st.plotly_chart(fig_pie1, use_container_width=True)
         else:
             st.info("등록된 지출 내역이 없습니다.")
             
-    st.subheader("📑 월별 상세 수지 분석표")
+    with c2:
+        df_var_inc = df_var_all[df_var_all['type'] == '수입'] if not df_var_all.empty else pd.DataFrame()
+        if not df_var_inc.empty:
+            inc_sum = df_var_inc.groupby("cat_large")["amount"].sum().reset_index()
+            fig_pie2 = px.pie(inc_sum, names="cat_large", values="amount", title="수입 대분류별 구성 비중", hole=0.45, color_discrete_sequence=px.colors.sequential.Blues_r)
+            st.plotly_chart(fig_pie2, use_container_width=True)
+        else:
+            st.info("등록된 수입 내역이 없습니다.")
+            
+    st.subheader("📑 상세 수지 분석표")
     st.dataframe(df_summary.style.format({
-        "총 수입": "{:,}원", "총 지출": "{:,}원", "고정 지출": "{:,}원",
-        "변동 지출": "{:,}원", "당월 순저축": "{:,}원", "누적 순저축": "{:,}원", "저축률(%)": "{:.2f}%"
+        "총 수입": "{:,}원", "총 지출": "{:,}원",
+        "당월 순저축": "{:,}원", "누적 순저축": "{:,}원", "저축률(%)": "{:.2f}%"
     }), use_container_width=True)
 
 # -------------------------------------------------------------
-# 메뉴 2: 월별 수입/지출 내역 관리 (대분류-소분류 연동)
+# 메뉴 2: 월별 수입/지출 내역 관리 (3단계 연동)
 # -------------------------------------------------------------
 elif menu == "월별 수입/지출 내역 관리":
     selected_month = st.sidebar.selectbox("조회/관리할 월 선택", [f"{i}월" for i in range(1, 13)])
     month_int = int(selected_month.replace("월", ""))
+    target_year = 2026 if selected_year_str == "전체" else int(selected_year_str)
     
-    st.title(f"🗓️ {selected_month} 가계부 내역 관리")
+    st.title(f"🗓️ {target_year}년 {selected_month} 가계부 내역 관리")
     
-    df_fix = get_fixed_items()
-    tot_fixed_inc = df_fix[df_fix['type'] == '수입']['amount'].sum() if not df_fix.empty else 0
-    tot_fixed_exp = df_fix[df_fix['type'] == '지출']['amount'].sum() if not df_fix.empty else 0
-    
-    all_recs = get_variable_records()
+    all_recs = get_variable_records(target_year)
     m_records = all_recs[all_recs["month"] == month_int] if not all_recs.empty else pd.DataFrame()
     
     m_var_inc = m_records[m_records["type"] == "수입"]["amount"].sum() if not m_records.empty else 0
     m_var_exp = m_records[m_records["type"] == "지출"]["amount"].sum() if not m_records.empty else 0
-    
-    m_tot_inc = tot_fixed_inc + m_var_inc
-    m_tot_exp = tot_fixed_exp + m_var_exp
-    m_net = m_tot_inc - m_tot_exp
+    m_net = m_var_inc - m_var_exp
     
     kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-    kpi1.metric("총 수입", f"{m_tot_inc:,} 원", delta=f"변동 +{m_var_inc:,}")
-    kpi2.metric("총 지출", f"{m_tot_exp:,} 원", delta=f"고정 {tot_fixed_exp:,} + 변동 {m_var_exp:,}", delta_color="inverse")
+    kpi1.metric("총 수입", f"{m_var_inc:,} 원")
+    kpi2.metric("총 지출", f"{m_var_exp:,} 원", delta_color="inverse")
     kpi3.metric("당월 순저축", f"{m_net:,} 원")
-    kpi4.metric("당월 저축률", f"{(m_net/m_tot_inc*100):.1f} %" if m_tot_inc > 0 else "0 %")
+    kpi4.metric("당월 저축률", f"{(m_net/m_var_inc*100):.1f} %" if m_var_inc > 0 else "0 %")
     
     st.divider()
     
@@ -458,22 +457,29 @@ elif menu == "월별 수입/지출 내역 관리":
             st.warning(f"✏️ [내역 수정] 항목 ID #{edit_item['id']} ({edit_item['name']}) 수정 중입니다.")
             
             with st.form("edit_record_form"):
-                col_type, col_date, col_name, col_amt = st.columns([1, 1.2, 2.5, 1.8])
+                col_y, col_type, col_date, col_name, col_amt = st.columns([1, 1, 1.2, 2.5, 1.8])
+                new_year = col_y.number_input("년도", min_value=2020, max_value=2035, value=int(edit_item['year']))
                 new_type = col_type.selectbox("구분", ["지출", "수입"], index=0 if edit_item["type"] == "지출" else 1)
                 new_date = col_date.text_input("일자 (YYYY.MM.DD 또는 MM-DD)", edit_item["date"])
                 new_name = col_name.text_input("항목명", edit_item["name"])
                 new_amt = col_amt.number_input("금액 (원)", min_value=0, value=int(edit_item["amount"]), step=1000)
                 
-                col_c1, col_c2 = st.columns(2)
-                type_hier = get_categories_hierarchy(new_type)
-                avail_cats = sorted(type_hier['category'].unique().tolist())
-                cur_cat_idx = avail_cats.index(edit_item['category']) if edit_item['category'] in avail_cats else 0
-                new_cat = col_c1.selectbox("대분류", avail_cats, index=cur_cat_idx)
+                type_hier = get_3tier_hierarchy(new_type)
+                avail_large = sorted(type_hier['cat_large'].unique().tolist())
+                cur_l_idx = avail_large.index(edit_item['cat_large']) if edit_item['cat_large'] in avail_large else 0
                 
-                avail_subs = sorted(type_hier[type_hier['category'] == new_cat]['sub_category'].tolist())
-                if not avail_subs: avail_subs = ['기타']
-                cur_sub_idx = avail_subs.index(edit_item['sub_category']) if edit_item['sub_category'] in avail_subs else 0
-                new_sub = col_c2.selectbox("소분류", avail_subs, index=cur_sub_idx)
+                col_l, col_m, col_s = st.columns(3)
+                new_large = col_l.selectbox("대분류", avail_large, index=cur_l_idx)
+                
+                avail_mid = sorted(type_hier[type_hier['cat_large'] == new_large]['cat_mid'].unique().tolist())
+                if not avail_mid: avail_mid = ['기타']
+                cur_m_idx = avail_mid.index(edit_item['cat_mid']) if edit_item['cat_mid'] in avail_mid else 0
+                new_mid = col_m.selectbox("중분류", avail_mid, index=cur_m_idx)
+                
+                avail_small = sorted(type_hier[(type_hier['cat_large'] == new_large) & (type_hier['cat_mid'] == new_mid)]['cat_small'].unique().tolist())
+                if not avail_small: avail_small = ['기타']
+                cur_s_idx = avail_small.index(edit_item['cat_small']) if edit_item['cat_small'] in avail_small else 0
+                new_small = col_s.selectbox("소분류", avail_small, index=cur_s_idx)
                 
                 b_save, b_cancel = st.columns(2)
                 if b_save.form_submit_button("수정 내용 저장", use_container_width=True):
@@ -481,35 +487,40 @@ elif menu == "월별 수입/지출 내역 관리":
                     cur = conn.cursor()
                     cur.execute("""
                     UPDATE variable_records 
-                    SET type=?, date=?, name=?, amount=?, category=?, sub_category=? 
+                    SET year=?, type=?, date=?, name=?, amount=?, cat_large=?, cat_mid=?, cat_small=? 
                     WHERE id=?
-                    """, (new_type, new_date, new_name, new_amt, new_cat, new_sub, int(edit_item['id'])))
+                    """, (new_year, new_type, new_date, new_name, new_amt, new_large, new_mid, new_small, int(edit_item['id'])))
                     conn.commit()
                     conn.close()
                     st.session_state.editing_record_id = None
-                    st.success("내역 수정 완료")
+                    st.success("수정 완료되었습니다.")
                     st.rerun()
                 if b_cancel.form_submit_button("수정 취소", use_container_width=True):
                     st.session_state.editing_record_id = None
                     st.rerun()
 
-    # 2) 신규 내역 등록 폼 (동적 대/소분류 드롭다운)
-    st.subheader(f"➕ {selected_month} 새로운 내역 직접 추가")
-    c_type, c_cat, c_sub = st.columns(3)
+    # 2) 신규 내역 등록 (대-중-소 연동)
+    st.subheader(f"➕ {target_year}년 {selected_month} 새로운 내역 직접 추가")
+    c_y, c_type, c_large, c_mid, c_small = st.columns(5)
+    rec_year = c_y.number_input("해당 년도", min_value=2020, max_value=2035, value=target_year, key="add_rec_year")
     rec_type = c_type.selectbox("수지 구분", ["지출", "수입"], key="add_rec_type")
     
-    hier_df = get_categories_hierarchy(rec_type)
-    cat_list = sorted(hier_df['category'].unique().tolist())
-    rec_cat = c_cat.selectbox(f"{rec_type} 대분류", cat_list, key="add_rec_cat")
+    hier_df = get_3tier_hierarchy(rec_type)
+    large_list = sorted(hier_df['cat_large'].unique().tolist())
+    rec_large = c_large.selectbox("대분류", large_list, key="add_rec_large")
     
-    sub_list = sorted(hier_df[hier_df['category'] == rec_cat]['sub_category'].tolist())
-    if not sub_list: sub_list = ['기타']
-    rec_sub = c_sub.selectbox(f"{rec_cat} 소분류", sub_list, key="add_rec_sub")
+    mid_list = sorted(hier_df[hier_df['cat_large'] == rec_large]['cat_mid'].unique().tolist())
+    if not mid_list: mid_list = ['기타']
+    rec_mid = c_mid.selectbox("중분류", mid_list, key="add_rec_mid")
+    
+    small_list = sorted(hier_df[(hier_df['cat_large'] == rec_large) & (hier_df['cat_mid'] == rec_mid)]['cat_small'].unique().tolist())
+    if not small_list: small_list = ['기타']
+    rec_small = c_small.selectbox("소분류", small_list, key="add_rec_small")
     
     with st.form("add_record_form", clear_on_submit=True):
         col_date, col_name, col_amt, col_btn = st.columns([1.2, 2.5, 2, 1.2])
         rec_date = col_date.text_input("일자 (MM-DD)", f"{month_int:02d}-01")
-        rec_name = col_name.text_input("항목명/거래처", placeholder="예: 이마트 장보기, 스타벅스")
+        rec_name = col_name.text_input("항목명/거래처", placeholder="예: 농협 하나로마트, 스타벅스")
         rec_amt = col_amt.number_input("금액 (원)", min_value=0, step=1000)
         btn_add = col_btn.form_submit_button("내역 등록", use_container_width=True)
         
@@ -518,12 +529,12 @@ elif menu == "월별 수입/지출 내역 관리":
                 conn = get_db_connection()
                 cur = conn.cursor()
                 cur.execute("""
-                INSERT INTO variable_records (month, type, date, time, name, amount, category, sub_category, memo, source) 
-                VALUES (?, ?, ?, '', ?, ?, ?, ?, '', '수기')
-                """, (month_int, rec_type, rec_date, rec_name, rec_amt, rec_cat, rec_sub))
+                INSERT INTO variable_records (year, month, type, date, time, name, amount, cat_large, cat_mid, cat_small, memo, source) 
+                VALUES (?, ?, ?, ?, '', ?, ?, ?, ?, ?, '', '수기')
+                """, (rec_year, month_int, rec_type, rec_date, rec_name, rec_amt, rec_large, rec_mid, rec_small))
                 conn.commit()
                 conn.close()
-                st.success(f"'{rec_name}' ({rec_amt:,}원) 등록 완료 [{rec_cat} > {rec_sub}]")
+                st.success(f"등록 완료 [{rec_large} > {rec_mid} > {rec_small}]")
                 st.rerun()
             else:
                 st.error("항목명과 유효한 금액을 입력해 주세요.")
@@ -531,23 +542,24 @@ elif menu == "월별 수입/지출 내역 관리":
     # 3) 등록 내역 목록 테이블
     st.subheader(f"📝 {selected_month} 등록 내역 목록 (총 {len(m_records)}건)")
     if not m_records.empty:
-        h1, h2, h3, h4, h5, h6, h7, h8, h9 = st.columns([1.2, 0.8, 2.2, 1.6, 1.3, 1.3, 0.8, 0.6, 0.6])
+        h1, h2, h3, h4, h5, h6, h7, h8, h9, h10 = st.columns([1.0, 0.8, 2.0, 1.5, 1.2, 1.2, 1.2, 0.8, 0.6, 0.6])
         h1.markdown("**일자**"); h2.markdown("**구분**"); h3.markdown("**거래처/항목**"); h4.markdown("**금액**")
-        h5.markdown("**대분류**"); h6.markdown("**소분류**"); h7.markdown("**출처**"); h8.markdown("**수정**"); h9.markdown("**삭제**")
+        h5.markdown("**대분류**"); h6.markdown("**중분류**"); h7.markdown("**소분류**"); h8.markdown("**출처**"); h9.markdown("**수정**"); h10.markdown("**삭제**")
         
         for idx, row in m_records.iterrows():
-            c1, c2, c3, c4, c5, c6, c7, c8, c9 = st.columns([1.2, 0.8, 2.2, 1.6, 1.3, 1.3, 0.8, 0.6, 0.6])
+            c1, c2, c3, c4, c5, c6, c7, c8, c9, c10 = st.columns([1.0, 0.8, 2.0, 1.5, 1.2, 1.2, 1.2, 0.8, 0.6, 0.6])
             c1.text(f"{row['date']}")
             c2.markdown(f"<span style='color:{'#2962FF' if row['type']=='수입' else '#FF5252'}; font-weight:bold;'>{row['type']}</span>", unsafe_allow_html=True)
             c3.text(f"{row['name']}")
             c4.text(f"{row['amount']:,} 원")
-            c5.text(f"{row['category']}")
-            c6.text(f"{row['sub_category']}")
-            c7.caption(f"{row['source']}")
-            if c8.button("✏️", key=f"edit_btn_{row['id']}"):
+            c5.text(f"{row['cat_large']}")
+            c6.text(f"{row['cat_mid']}")
+            c7.text(f"{row['cat_small']}")
+            c8.caption(f"{row['source']}")
+            if c9.button("✏️", key=f"edit_btn_{row['id']}"):
                 st.session_state.editing_record_id = row['id']
                 st.rerun()
-            if c9.button("🗑", key=f"del_rec_{row['id']}"):
+            if c10.button("🗑", key=f"del_rec_{row['id']}"):
                 conn = get_db_connection()
                 cur = conn.cursor()
                 cur.execute("DELETE FROM variable_records WHERE id=?", (int(row['id']),))
@@ -558,139 +570,151 @@ elif menu == "월별 수입/지출 내역 관리":
         st.info("해당 월에 등록된 거래 내역이 없습니다.")
 
 # -------------------------------------------------------------
-# 메뉴 3: 📊 대/소분류 심층 통계 분석 (지출/수입 세분화 탭)
+# 메뉴 3: 📊 3단계 분류 심층 통계 분석 (통합 & 다차원 대시보드)
 # -------------------------------------------------------------
-elif menu == "📊 대/소분류 심층 통계 분석":
-    st.title("📊 대분류 · 소분류 심층 통계 분석")
-    st.info("💡 대분류와 소분류로 세분화된 지출 및 수입 분석 시트와 계층형 시각화 차트입니다.")
+elif menu == "📊 3단계 분류 심층 통계 분석":
+    st.title(f"📊 {selected_year_str}년도 3단계 분류 심층 통계 분석")
+    st.info("💡 대분류 - 중분류 - 소분류 3단계 계층 구조를 기반으로 다양한 시각화 차트와 피벗 시트를 제공합니다.")
     
-    df_var = get_variable_records()
+    df_var = get_variable_records(selected_year_str)
     
-    tab_exp, tab_inc = st.tabs(["💸 지출 - 대/소분류 통계", "💰 수입 - 대/소분류 통계"])
+    # 뷰 선택 모드
+    view_mode = st.radio("분석 모드 선택", ["💸 지출 3단계 심층 분석", "💰 수입 3단계 심층 분석", "⚖️ 수입/지출 통합 비교 분석"], horizontal=True)
     
-    # ------------------ [탭 1: 지출 통계] ------------------
-    with tab_exp:
+    if view_mode == "💸 지출 3단계 심층 분석":
         exp_df = df_var[df_var['type'] == '지출'] if not df_var.empty else pd.DataFrame()
         if exp_df.empty:
             st.warning("등록된 지출 내역이 없습니다.")
         else:
             tot_exp_val = exp_df['amount'].sum()
-            top_cat = exp_df.groupby("category")["amount"].sum().idxmax()
-            top_sub = exp_df.groupby(["category", "sub_category"])["amount"].sum().idxmax()
-            top_sub_amt = exp_df.groupby(["category", "sub_category"])["amount"].sum().max()
+            top_l = exp_df.groupby("cat_large")["amount"].sum().idxmax()
+            top_m = exp_df.groupby("cat_mid")["amount"].sum().idxmax()
+            top_s = exp_df.groupby(["cat_large", "cat_mid", "cat_small"])["amount"].sum().idxmax()
+            top_s_amt = exp_df.groupby(["cat_large", "cat_mid", "cat_small"])["amount"].sum().max()
             
-            k1, k2, k3 = st.columns(3)
-            k1.metric("총 변동 지출액", f"{tot_exp_val:,} 원")
-            k2.metric("최대 지출 대분류", f"{top_cat}")
-            k3.metric("최대 지출 소분류", f"{top_sub[0]} > {top_sub[1]}", delta=f"{top_sub_amt:,}원 ({(top_sub_amt/tot_exp_val*100):.1f}%)")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("총 지출액", f"{tot_exp_val:,} 원")
+            c2.metric("최다 지출 대분류", f"{top_l}")
+            c3.metric("최다 지출 중분류", f"{top_m}")
+            c4.metric("최다 지출 소분류", f"{top_s[2]}", delta=f"{top_s_amt:,}원 ({(top_s_amt/tot_exp_val*100):.1f}%)")
             
             st.divider()
             
-            # 1. 선버스트(Sunburst) 계층형 차트 & 트리맵
-            st.subheader("1️⃣ 지출 계층 구조 시각화 (대분류 ➡️ 소분류)")
-            c_sb1, c_sb2 = st.columns(2)
-            with c_sb1:
-                fig_sun = px.sunburst(
+            # 사용자 차트 선택기
+            st.subheader("🎨 지출 시각화 대시보드 선택")
+            chart_choice = st.selectbox("차트 형태 선택", ["3단계 선버스트 차트 (Sunburst)", "3단계 트리맵 (Treemap)", "중분류별 지출 도넛 차트", "소분류 Top 15 랭킹 바", "월별 × 대분류 지출 히트맵"])
+            
+            if chart_choice == "3단계 선버스트 차트 (Sunburst)":
+                fig = px.sunburst(
                     exp_df, 
-                    path=['category', 'sub_category'], 
-                    values='amount',
-                    title="대분류-소분류 지출 비중 (선버스트 차트)",
-                    color='amount',
+                    path=['cat_large', 'cat_mid', 'cat_small'], 
+                    values='amount', 
+                    title="대분류 ➡️ 중분류 ➡️ 소분류 지출 계층 구조", 
+                    color='amount', 
                     color_continuous_scale='Reds'
                 )
-                st.plotly_chart(fig_sun, use_container_width=True)
-            with c_sb2:
-                fig_tree = px.treemap(
+                st.plotly_chart(fig, use_container_width=True)
+            elif chart_choice == "3단계 트리맵 (Treemap)":
+                fig = px.treemap(
                     exp_df, 
-                    path=['category', 'sub_category'], 
-                    values='amount',
-                    title="소분류별 지출 면적 트리맵 (Treemap)",
-                    color='amount',
+                    path=['cat_large', 'cat_mid', 'cat_small'], 
+                    values='amount', 
+                    title="대-중-소 지출 면적 비중 트리맵", 
+                    color='amount', 
                     color_continuous_scale='YlOrRd'
                 )
-                st.plotly_chart(fig_tree, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True)
+            elif chart_choice == "중분류별 지출 도넛 차트":
+                mid_sum = exp_df.groupby("cat_mid")["amount"].sum().reset_index()
+                fig = px.pie(mid_sum, names="cat_mid", values="amount", title="중분류별 지출 비중", hole=0.45)
+                st.plotly_chart(fig, use_container_width=True)
+            elif chart_choice == "소분류 Top 15 랭킹 바":
+                small_sum = exp_df.groupby(["cat_large", "cat_mid", "cat_small"])["amount"].sum().reset_index()
+                small_sum["계층표시"] = small_sum["cat_large"] + " > " + small_sum["cat_mid"] + " > " + small_sum["cat_small"]
+                small_sum = small_sum.sort_values(by="amount", ascending=True).tail(15)
+                fig = px.bar(small_sum, x="amount", y="계층표시", orientation='h', text="amount", color="amount", color_continuous_scale="Purples", title="소분류 누적 지출 Top 15")
+                fig.update_traces(texttemplate='%{text:,}원', textposition='outside')
+                st.plotly_chart(fig, use_container_width=True)
+            elif chart_choice == "월별 × 대분류 지출 히트맵":
+                pivot_heat = exp_df.pivot_table(index='cat_large', columns='month', values='amount', aggfunc='sum', fill_value=0)
+                fig = px.imshow(pivot_heat, labels=dict(x="월", y="대분류", color="지출액"), aspect="auto", color_continuous_scale="Reds", title="대분류별 월별 지출 집중도 히트맵")
+                st.plotly_chart(fig, use_container_width=True)
                 
-            # 2. 소분류별 누적 지출 랭킹 (Top 10)
-            st.subheader("2️⃣ 소분류별 누적 지출 순위 (Top 10)")
-            sub_ranked = exp_df.groupby(["category", "sub_category"])["amount"].sum().reset_index()
-            sub_ranked["분류_표시"] = sub_ranked["category"] + " > " + sub_ranked["sub_category"]
-            sub_ranked = sub_ranked.sort_values(by="amount", ascending=True).tail(10)
-            
-            fig_sub_bar = px.bar(
-                sub_ranked,
-                x="amount",
-                y="분류_표시",
-                orientation='h',
-                text="amount",
-                color="amount",
-                color_continuous_scale="Purples",
-                title="상위 10개 소분류 지출 항목"
-            )
-            fig_sub_bar.update_traces(texttemplate='%{text:,}원', textposition='outside')
-            fig_sub_bar.update_layout(xaxis_title="지출 합계 (원)", yaxis_title="대분류 > 소분류", coloraxis_showscale=False)
-            st.plotly_chart(fig_sub_bar, use_container_width=True)
+            # 3단계 피벗 시트
+            st.subheader("📑 [지출] 대분류 - 중분류 - 소분류 월별 상세 피벗 테이블")
+            exp_pivot = generate_3tier_pivot(selected_year_str, '지출')
+            fmt = {col: "{:,}원" for col in exp_pivot.columns if col not in ['대분류', '중분류', '소분류']}
+            st.dataframe(exp_pivot.style.format(fmt), use_container_width=True)
 
-            # 3. 2계층 지출 피벗 테이블 시트
-            st.subheader("3️⃣ [지출] 대분류 · 소분류별 월별 상세 집계표")
-            exp_pivot = generate_detailed_pivot('지출')
-            fmt_exp = {col: "{:,}원" for col in exp_pivot.columns if col not in ['대분류', '소분류']}
-            st.dataframe(exp_pivot.style.format(fmt_exp), use_container_width=True)
-
-    # ------------------ [탭 2: 수입 통계] ------------------
-    with tab_inc:
+    elif view_mode == "💰 수입 3단계 심층 분석":
         inc_df = df_var[df_var['type'] == '수입'] if not df_var.empty else pd.DataFrame()
         if inc_df.empty:
             st.warning("등록된 수입 내역이 없습니다.")
         else:
             tot_inc_val = inc_df['amount'].sum()
-            top_inc_cat = inc_df.groupby("category")["amount"].sum().idxmax()
-            top_inc_sub = inc_df.groupby(["category", "sub_category"])["amount"].sum().idxmax()
-            top_inc_sub_amt = inc_df.groupby(["category", "sub_category"])["amount"].sum().max()
+            top_il = inc_df.groupby("cat_large")["amount"].sum().idxmax()
+            top_im = inc_df.groupby("cat_mid")["amount"].sum().idxmax()
+            top_is = inc_df.groupby(["cat_large", "cat_mid", "cat_small"])["amount"].sum().idxmax()
             
-            ik1, ik2, ik3 = st.columns(3)
-            ik1.metric("총 변동 수입액", f"{tot_inc_val:,} 원")
-            ik2.metric("최대 수입 대분류", f"{top_inc_cat}")
-            ik3.metric("최대 수입 소분류", f"{top_inc_sub[0]} > {top_inc_sub[1]}", delta=f"{top_inc_sub_amt:,}원 ({(top_inc_sub_amt/tot_inc_val*100):.1f}%)")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("총 수입액", f"{tot_inc_val:,} 원")
+            c2.metric("최대 수입 대분류", f"{top_il}")
+            c3.metric("최대 수입 중분류", f"{top_im}")
+            c4.metric("최대 수입 소분류", f"{top_is[2]}")
             
             st.divider()
             
-            # 수입 계층 차트
-            st.subheader("1️⃣ 수입 계층 구조 시각화 (대분류 ➡️ 소분류)")
-            ci_1, ci_2 = st.columns(2)
-            with ci_1:
-                fig_inc_sun = px.sunburst(
-                    inc_df, 
-                    path=['category', 'sub_category'], 
-                    values='amount',
-                    title="대분류-소분류 수입 구성 (선버스트 차트)",
-                    color='amount',
-                    color_continuous_scale='Blues'
-                )
+            col_i1, col_i2 = st.columns(2)
+            with col_i1:
+                fig_inc_sun = px.sunburst(inc_df, path=['cat_large', 'cat_mid', 'cat_small'], values='amount', title="수입 계층 선버스트 차트", color='amount', color_continuous_scale='Blues')
                 st.plotly_chart(fig_inc_sun, use_container_width=True)
-            with ci_2:
-                inc_sub_sum = inc_df.groupby(["category", "sub_category"])["amount"].sum().reset_index()
-                inc_sub_sum["수입항목"] = inc_sub_sum["category"] + " > " + inc_sub_sum["sub_category"]
-                fig_inc_pie = px.pie(
-                    inc_sub_sum,
-                    names="수입항목",
-                    values="amount",
-                    title="소분류별 수입 비중 (도넛 차트)",
-                    hole=0.45
-                )
-                st.plotly_chart(fig_inc_pie, use_container_width=True)
+            with col_i2:
+                inc_tree = px.treemap(inc_df, path=['cat_large', 'cat_mid', 'cat_small'], values='amount', title="수입 트리맵 구조", color='amount', color_continuous_scale='Teal')
+                st.plotly_chart(inc_tree, use_container_width=True)
+                
+            st.subheader("📑 [수입] 대분류 - 중분류 - 소분류 월별 상세 피벗 테이블")
+            inc_pivot = generate_3tier_pivot(selected_year_str, '수입')
+            fmt_i = {col: "{:,}원" for col in inc_pivot.columns if col not in ['대분류', '중분류', '소분류']}
+            st.dataframe(inc_pivot.style.format(fmt_i), use_container_width=True)
 
-            # 2계층 수입 피벗 테이블 시트
-            st.subheader("2️⃣ [수입] 대분류 · 소분류별 월별 상세 집계표")
-            inc_pivot = generate_detailed_pivot('수입')
-            fmt_inc = {col: "{:,}원" for col in inc_pivot.columns if col not in ['대분류', '소분류']}
-            st.dataframe(inc_pivot.style.format(fmt_inc), use_container_width=True)
+    else:
+        # 통합 비교 뷰
+        st.subheader("⚖️️ 수입 vs 지출 통합 대분류 비교 분석")
+        if not df_var.empty:
+            type_cat_sum = df_var.groupby(["type", "cat_large"])["amount"].sum().reset_index()
+            fig_compare = px.bar(
+                type_cat_sum, 
+                x="cat_large", 
+                y="amount", 
+                color="type", 
+                barmode="group",
+                title="수입 및 지출 대분류별 금액 비교",
+                color_discrete_map={"수입": "#2962FF", "지출": "#FF5252"}
+            )
+            fig_compare.update_traces(texttemplate='%{y:,}원', textposition='outside')
+            st.plotly_chart(fig_compare, use_container_width=True)
+            
+            if selected_year_str == "전체":
+                st.subheader("📅 연도별(Year-over-Year) 수입/지출 총액 추이")
+                yoy_df = df_var.groupby(["year", "type"])["amount"].sum().reset_index()
+                fig_yoy = px.bar(
+                    yoy_df, 
+                    x="year", 
+                    y="amount", 
+                    color="type", 
+                    barmode="group",
+                    title="연도별 수입 및 지출 규모 변동 추이",
+                    color_discrete_map={"수입": "#2962FF", "지출": "#FF5252"}
+                )
+                fig_yoy.update_traces(texttemplate='%{y:,}원', textposition='outside')
+                st.plotly_chart(fig_yoy, use_container_width=True)
 
 # -------------------------------------------------------------
 # 메뉴 4: 🏦 KB 국민은행 거래내역 엑셀 연동
 # -------------------------------------------------------------
 elif menu == "🏦 KB 거래내역 엑셀 연동":
-    st.title("🏦 KB국민은행 거래내역 엑셀 자동 연동")
-    st.info("국민은행 인터넷뱅킹에서 다운로드한 '거래내역조회 엑셀 파일'(`.xls` 또는 `.xlsx`)을 업로드하면 지능형 분류 엔진에 따라 대분류 및 소분류까지 자동으로 지정됩니다.")
+    st.title("🏦 KB국민은행 거래내역 엑셀 자동 연동 (3단계)")
+    st.info("국민은행 거래내역 엑셀 파일을 업로드하면 3단계 규칙(대분류-중분류-소분류)에 따라 100% 자동 매핑됩니다.")
 
     uploaded_file = st.file_uploader("KB국민은행 거래내역 엑셀 파일 업로드", type=["xls", "xlsx"])
     
@@ -720,8 +744,11 @@ elif menu == "🏦 KB 거래내역 엑셀 연동":
                 time_part = dt_str.split(' ')[1] if ' ' in dt_str else ''
                 
                 try:
-                    month_num = int(date_part.split('.')[1])
+                    parts = date_part.split('.')
+                    rec_year = int(parts[0])
+                    month_num = int(parts[1])
                 except Exception:
+                    rec_year = 2026
                     month_num = 1
                 
                 if withdraw_amt > 0:
@@ -734,25 +761,27 @@ elif menu == "🏦 KB 거래내역 엑셀 연동":
                     continue
                     
                 display_name = partner_val if partner_val and partner_val != 'nan' else summary_val
-                # 대분류 및 소분류 자동 매핑
-                assigned_cat, assigned_sub = auto_classify_kb_record(partner_val, memo_val, rec_type, summary_val)
+                # 3단계 지능형 자동 분류
+                c_large, c_mid, c_small = auto_classify_3tier(partner_val, memo_val, rec_type, summary_val)
                 
                 parsed_rows.append({
+                    "year": rec_year,
                     "month": month_num,
                     "type": rec_type,
                     "date": date_part,
                     "time": time_part,
                     "name": display_name,
                     "amount": amt,
-                    "category": assigned_cat,
-                    "sub_category": assigned_sub,
+                    "cat_large": c_large,
+                    "cat_mid": c_mid,
+                    "cat_small": c_small,
                     "memo": memo_val if memo_val != 'nan' else '',
                     "source": "KB국민"
                 })
             
             preview_df = pd.DataFrame(parsed_rows)
-            st.subheader("👀 대/소분류 자동 분류 및 분개 미리보기")
-            st.dataframe(preview_df[["date", "type", "name", "amount", "category", "sub_category", "memo"]].head(15).style.format({"amount": "{:,}원"}), use_container_width=True)
+            st.subheader("👀 3단계 자동 분류 및 분개 미리보기")
+            st.dataframe(preview_df[["year", "date", "type", "name", "amount", "cat_large", "cat_mid", "cat_small"]].head(15).style.format({"amount": "{:,}원"}), use_container_width=True)
             
             c_btn1, _ = st.columns([1, 2])
             with c_btn1:
@@ -772,9 +801,9 @@ elif menu == "🏦 KB 거래내역 엑셀 연동":
                             skipped_cnt += 1
                             continue
                         cur.execute("""
-                        INSERT INTO variable_records (month, type, date, time, name, amount, category, sub_category, memo, source)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (row['month'], row['type'], row['date'], row['time'], row['name'], row['amount'], row['category'], row['sub_category'], row['memo'], row['source']))
+                        INSERT INTO variable_records (year, month, type, date, time, name, amount, cat_large, cat_mid, cat_small, memo, source)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (row['year'], row['month'], row['type'], row['date'], row['time'], row['name'], row['amount'], row['cat_large'], row['cat_mid'], row['cat_small'], row['memo'], row['source']))
                         inserted_cnt += 1
                         existing_keys.add(key)
                         
@@ -786,39 +815,45 @@ elif menu == "🏦 KB 거래내역 엑셀 연동":
             st.error(f"파일 처리 중 오류가 발생했습니다: {e}")
 
 # -------------------------------------------------------------
-# 메뉴 5: ⚙️ 지능형 자동분류 규칙 관리 (대/소분류 키워드)
+# 메뉴 5: ⚙️ 지능형 자동분류 규칙 관리 (3단계 매핑)
 # -------------------------------------------------------------
 elif menu == "⚙️ 지능형 자동분류 규칙 관리":
     st.title("⚙️ KB 지능형 자동 분류 규칙(키워드) 관리")
-    st.info("💡 거래처/적요 키워드를 등록하면, 국민은행 엑셀을 업로드할 때 지정한 [대분류 > 소분류]로 정확하게 자동 분개됩니다.")
+    st.info("💡 키워드를 등록하면 국민은행 엑셀을 업로드할 때 [대분류 > 중분류 > 소분류]로 100% 자동 매핑됩니다.")
     
-    rules_df = get_auto_rules()
+    rules_df = get_auto_rules_3tier()
     col_r_add, col_r_list = st.columns([1, 1.5])
     
     with col_r_add:
         st.subheader("➕ 새 자동분류 키워드 등록")
-        r_type = st.selectbox("수지 구분", ["지출", "수입"], key="rule_add_type")
-        hier_df = get_categories_hierarchy(r_type)
-        cats = sorted(hier_df['category'].unique().tolist())
-        r_cat = st.selectbox("매핑할 대분류", cats, key="rule_add_cat")
-        subs = sorted(hier_df[hier_df['category'] == r_cat]['sub_category'].tolist())
-        if not subs: subs = ['기타']
-        r_sub = st.selectbox("매핑할 소분류", subs, key="rule_add_sub")
+        r_type = st.selectbox("수지 구분", ["지출", "수입"], key="rule_3_type")
+        hier_df = get_3tier_hierarchy(r_type)
         
-        with st.form("add_rule_form", clear_on_submit=True):
-            r_kw = st.text_input("매칭 키워드 (예: 스타벅스, 올리브영, GS25, 파머스)")
+        c_l_list = sorted(hier_df['cat_large'].unique().tolist())
+        r_large = st.selectbox("매핑할 대분류", c_l_list, key="rule_3_l")
+        
+        c_m_list = sorted(hier_df[hier_df['cat_large'] == r_large]['cat_mid'].unique().tolist())
+        if not c_m_list: c_m_list = ['기타']
+        r_mid = st.selectbox("매핑할 중분류", c_m_list, key="rule_3_m")
+        
+        c_s_list = sorted(hier_df[(hier_df['cat_large'] == r_large) & (hier_df['cat_mid'] == r_mid)]['cat_small'].unique().tolist())
+        if not c_s_list: c_s_list = ['기타']
+        r_small = st.selectbox("매핑할 소분류", c_s_list, key="rule_3_s")
+        
+        with st.form("add_rule_3tier_form", clear_on_submit=True):
+            r_kw = st.text_input("매칭 키워드 (예: 스타벅스, 올리브영, 파머스)")
             if st.form_submit_button("키워드 규칙 추가", use_container_width=True):
                 if r_kw.strip():
                     try:
                         conn = get_db_connection()
                         cur = conn.cursor()
                         cur.execute("""
-                        INSERT INTO auto_rules (rule_type, category, sub_category, keyword) 
-                        VALUES (?, ?, ?, ?)
-                        """, (r_type, r_cat, r_sub, r_kw.strip().lower()))
+                        INSERT INTO auto_rules_3tier (rule_type, cat_large, cat_mid, cat_small, keyword) 
+                        VALUES (?, ?, ?, ?, ?)
+                        """, (r_type, r_large, r_mid, r_small, r_kw.strip().lower()))
                         conn.commit()
                         conn.close()
-                        st.success(f"키워드 '{r_kw.strip()}' ➡️ [{r_cat} > {r_sub}] 등록 완료")
+                        st.success(f"키워드 '{r_kw.strip()}' ➡️ [{r_large} > {r_mid} > {r_small}] 등록 완료")
                         st.rerun()
                     except sqlite3.IntegrityError:
                         st.warning("이미 등록되어 있는 키워드입니다.")
@@ -827,23 +862,24 @@ elif menu == "⚙️ 지능형 자동분류 규칙 관리":
                     
     with col_r_list:
         st.subheader(f"📋 등록된 자동 분류 규칙 (총 {len(rules_df)}개)")
-        f_type = st.radio("보기 필터", ["전체", "지출", "수입"], horizontal=True)
+        f_type = st.radio("보기 필터", ["전체", "지출", "수입"], horizontal=True, key="filter_rule_view")
         disp_rules = rules_df if f_type == "전체" else rules_df[rules_df['rule_type'] == f_type]
         
         if not disp_rules.empty:
-            h1, h2, h3, h4, h5 = st.columns([1, 1.5, 1.5, 2.5, 0.8])
-            h1.markdown("**구분**"); h2.markdown("**대분류**"); h3.markdown("**소분류**"); h4.markdown("**매칭 키워드**"); h5.markdown("**삭제**")
+            h1, h2, h3, h4, h5, h6 = st.columns([0.8, 1.2, 1.2, 1.2, 2.0, 0.6])
+            h1.markdown("**구분**"); h2.markdown("**대분류**"); h3.markdown("**중분류**"); h4.markdown("**소분류**"); h5.markdown("**매칭 키워드**"); h6.markdown("**삭제**")
             
             for _, r in disp_rules.iterrows():
-                c1, c2, c3, c4, c5 = st.columns([1, 1.5, 1.5, 2.5, 0.8])
+                c1, c2, c3, c4, c5, c6 = st.columns([0.8, 1.2, 1.2, 1.2, 2.0, 0.6])
                 c1.text(r['rule_type'])
-                c2.text(r['category'])
-                c3.text(r['sub_category'])
-                c4.markdown(f"`{r['keyword']}`")
-                if c5.button("🗑", key=f"del_rule_{r['id']}"):
+                c2.text(r['cat_large'])
+                c3.text(r['cat_mid'])
+                c4.text(r['cat_small'])
+                c5.markdown(f"`{r['keyword']}`")
+                if c6.button("🗑", key=f"del_rule3_{r['id']}"):
                     conn = get_db_connection()
                     cur = conn.cursor()
-                    cur.execute("DELETE FROM auto_rules WHERE id=?", (int(r['id']),))
+                    cur.execute("DELETE FROM auto_rules_3tier WHERE id=?", (int(r['id']),))
                     conn.commit()
                     conn.close()
                     st.rerun()
@@ -851,153 +887,79 @@ elif menu == "⚙️ 지능형 자동분류 규칙 관리":
             st.info("등록된 규칙이 없습니다.")
 
 # -------------------------------------------------------------
-# 메뉴 6: 고정 수입/지출 관리
+# 메뉴 6: 🏷️ 대/중/소분류 체계 관리
 # -------------------------------------------------------------
-elif menu == "고정 수입/지출 관리":
-    st.title("⚙️ 고정 수입 및 고정 지출 설정")
-    df_fix = get_fixed_items()
-    col_l, col_r = st.columns(2)
+elif menu == "🏷️ 대/중/소분류 체계 관리":
+    st.title("🏷️ 대분류 · 중분류 · 소분류 3단계 체계 관리")
+    st.info("💡 가계부에서 사용할 3단계 분류 체계를 자유롭게 추가하거나 삭제할 수 있습니다.")
     
-    with col_l:
-        st.subheader("💵 고정 수입 항목")
-        with st.form("add_finc_form", clear_on_submit=True):
-            f_inc_name = st.text_input("고정 수입 항목명", placeholder="예: 본인 급여")
-            f_inc_amt = st.number_input("월 수입 금액 (원)", min_value=0, step=10000)
-            if st.form_submit_button("고정 수입 추가", use_container_width=True):
-                if f_inc_name and f_inc_amt > 0:
-                    conn = get_db_connection()
-                    cur = conn.cursor()
-                    cur.execute("INSERT INTO fixed_items (type, name, amount, payment_method, category, sub_category) VALUES ('수입', ?, ?, '-', '급여', '본인급여')", (f_inc_name, f_inc_amt))
-                    conn.commit()
-                    conn.close()
-                    st.rerun()
+    col_add_3, col_view_3 = st.columns([1, 1.5])
+    
+    with col_add_3:
+        st.subheader("➕ 새 3단계 분류 등록")
+        h_type = st.selectbox("수지 구분", ["지출", "수입"], key="hier3_type")
+        hier_df = get_3tier_hierarchy(h_type)
         
-        inc_items = df_fix[df_fix['type'] == '수입'] if not df_fix.empty else pd.DataFrame()
-        st.markdown(f"**월 고정 수입 합계: `{inc_items['amount'].sum() if not inc_items.empty else 0:,} 원`**")
-        for idx, item in inc_items.iterrows():
-            with st.expander(f"{item['name']} : {item['amount']:,} 원"):
-                with st.form(f"finc_{item['id']}"):
-                    un = st.text_input("항목명", value=item['name'])
-                    ua = st.number_input("월 금액 (원)", min_value=0, value=int(item['amount']), step=10000)
-                    b1, b2 = st.columns(2)
-                    if b1.form_submit_button("변경 저장"):
-                        conn = get_db_connection()
-                        cur = conn.cursor()
-                        cur.execute("UPDATE fixed_items SET name=?, amount=? WHERE id=?", (un, ua, int(item['id'])))
-                        conn.commit()
-                        conn.close()
-                        st.rerun()
-                    if b2.form_submit_button("삭제", type="secondary"):
-                        conn = get_db_connection()
-                        cur = conn.cursor()
-                        cur.execute("DELETE FROM fixed_items WHERE id=?", (int(item['id']),))
-                        conn.commit()
-                        conn.close()
-                        st.rerun()
-
-    with col_r:
-        st.subheader("💳 고정 지출 항목")
-        pay_methods = ["자동이체", "카드납부", "카드결제", "현금", "기타"]
-        with st.form("add_fexp_form", clear_on_submit=True):
-            f_exp_name = st.text_input("고정 지출 항목명", placeholder="예: 주택담보대출")
-            f_exp_amt = st.number_input("월 지출 금액 (원)", min_value=0, step=10000)
-            f_exp_pay = st.selectbox("결제방식", pay_methods)
-            if st.form_submit_button("고정 지출 추가", use_container_width=True):
-                if f_exp_name and f_exp_amt > 0:
-                    conn = get_db_connection()
-                    cur = conn.cursor()
-                    cur.execute("INSERT INTO fixed_items (type, name, amount, payment_method, category, sub_category) VALUES ('지출', ?, ?, ?, '금융/주거', '기타')", (f_exp_name, f_exp_amt, f_exp_pay))
-                    conn.commit()
-                    conn.close()
-                    st.rerun()
-        
-        exp_items = df_fix[df_fix['type'] == '지출'] if not df_fix.empty else pd.DataFrame()
-        st.markdown(f"**월 고정 지출 합계: `{exp_items['amount'].sum() if not exp_items.empty else 0:,} 원`**")
-        for idx, item in exp_items.iterrows():
-            with st.expander(f"{item['name']} ({item['payment_method']}) : {item['amount']:,} 원"):
-                with st.form(f"fexp_{item['id']}"):
-                    un = st.text_input("항목명", value=item['name'])
-                    ua = st.number_input("월 금액 (원)", min_value=0, value=int(item['amount']), step=10000)
-                    up = st.selectbox("결제방식", pay_methods, index=pay_methods.index(item['payment_method']) if item['payment_method'] in pay_methods else 0)
-                    b1, b2 = st.columns(2)
-                    if b1.form_submit_button("변경 저장"):
-                        conn = get_db_connection()
-                        cur = conn.cursor()
-                        cur.execute("UPDATE fixed_items SET name=?, amount=?, payment_method=? WHERE id=?", (un, ua, up, int(item['id'])))
-                        conn.commit()
-                        conn.close()
-                        st.rerun()
-                    if b2.form_submit_button("삭제", type="secondary"):
-                        conn = get_db_connection()
-                        cur = conn.cursor()
-                        cur.execute("DELETE FROM fixed_items WHERE id=?", (int(item['id']),))
-                        conn.commit()
-                        conn.close()
-                        st.rerun()
-
-# -------------------------------------------------------------
-# 메뉴 7: 🏷️ 대/소분류 체계 설정
-# -------------------------------------------------------------
-elif menu == "🏷️ 대/소분류 체계 설정":
-    st.title("🏷️ 대분류 및 소분류 체계 관리")
-    st.info("💡 수입 및 지출에 사용할 대분류와 소분류 항목을 자유롭게 추가하거나 삭제할 수 있습니다.")
-    
-    col_add_hier, col_view_hier = st.columns([1, 1.5])
-    
-    with col_add_hier:
-        st.subheader("➕ 새 소분류/대분류 추가")
-        with st.form("add_hier_form", clear_on_submit=True):
-            h_type = st.selectbox("수지 구분", ["지출", "수입"])
-            existing_hier = get_categories_hierarchy(h_type)
-            existing_cats = sorted(existing_hier['category'].unique().tolist())
+        mode_l = st.radio("대분류 선택 방식", ["기존 대분류 선택", "새 대분류 직접 입력"], horizontal=True)
+        if mode_l == "기존 대분류 선택":
+            l_candidates = sorted(hier_df['cat_large'].unique().tolist())
+            inp_l = st.selectbox("대분류 선택", l_candidates)
+        else:
+            inp_l = st.text_input("새 대분류명 입력")
             
-            sel_cat_mode = st.radio("대분류 선택 방식", ["기존 대분류 선택", "새 대분류 직접 입력"], horizontal=True)
-            if sel_cat_mode == "기존 대분류 선택":
-                h_cat = st.selectbox("대분류 선택", existing_cats)
+        mode_m = st.radio("중분류 선택 방식", ["기존 중분류 선택", "새 중분류 직접 입력"], horizontal=True)
+        if mode_m == "기존 중분류 선택" and mode_l == "기존 대분류 선택":
+            m_candidates = sorted(hier_df[hier_df['cat_large'] == inp_l]['cat_mid'].unique().tolist())
+            if not m_candidates: m_candidates = ['기타']
+            inp_m = st.selectbox("중분류 선택", m_candidates)
+        else:
+            inp_m = st.text_input("새 중분류명 입력")
+            
+        inp_s = st.text_input("추가할 소분류명 입력")
+        
+        if st.button("3단계 분류 등록하기", use_container_width=True):
+            if inp_l.strip() and inp_m.strip() and inp_s.strip():
+                try:
+                    conn = get_db_connection()
+                    cur = conn.cursor()
+                    cur.execute("""
+                    INSERT INTO category_hierarchy_3tier (type, cat_large, cat_mid, cat_small) 
+                    VALUES (?, ?, ?, ?)
+                    """, (h_type, inp_l.strip(), inp_m.strip(), inp_s.strip()))
+                    conn.commit()
+                    conn.close()
+                    st.success(f"[{h_type}] {inp_l.strip()} > {inp_m.strip()} > {inp_s.strip()} 등록 성공!")
+                    st.rerun()
+                except sqlite3.IntegrityError:
+                    st.warning("이미 존재하는 분류 조합입니다.")
             else:
-                h_cat = st.text_input("새 대분류명 입력")
+                st.error("대분류, 중분류, 소분류 이름을 모두 입력해 주세요.")
                 
-            h_sub = st.text_input("추가할 소분류명 입력 (예: 야식/배달, 캠핑용품 등)")
-            
-            if st.form_submit_button("분류 체계에 추가", use_container_width=True):
-                if h_cat.strip() and h_sub.strip():
-                    try:
-                        conn = get_db_connection()
-                        cur = conn.cursor()
-                        cur.execute("""
-                        INSERT INTO category_hierarchy (type, category, sub_category) 
-                        VALUES (?, ?, ?)
-                        """, (h_type, h_cat.strip(), h_sub.strip()))
-                        conn.commit()
-                        conn.close()
-                        st.success(f"[{h_type}] {h_cat.strip()} ➡️ {h_sub.strip()} 등록 성공!")
-                        st.rerun()
-                    except sqlite3.IntegrityError:
-                        st.warning("이미 존재하는 대분류-소분류 조합입니다.")
-                else:
-                    st.error("대분류와 소분류명을 모두 입력해 주세요.")
-                    
-    with col_view_hier:
-        st.subheader("📋 현재 등록된 대분류/소분류 목록")
-        v_type = st.radio("조회할 구분", ["지출", "수입"], horizontal=True, key="view_hier_type")
-        v_df = get_categories_hierarchy(v_type)
+    with col_view_3:
+        st.subheader("📋 현재 등록된 3단계 분류 체계")
+        v_type = st.radio("조회할 수지 구분", ["지출", "수입"], horizontal=True, key="view3_type")
+        v_df = get_3tier_hierarchy(v_type)
         
-        for cat_name, group in v_df.groupby("category"):
-            with st.expander(f"📁 {cat_name} (소분류 {len(group)}개)"):
-                for _, r in group.iterrows():
-                    c_txt, c_del = st.columns([3, 1])
-                    c_txt.text(f"  └ {r['sub_category']}")
-                    if c_del.button("삭제", key=f"del_hier_{v_type}_{cat_name}_{r['sub_category']}"):
-                        conn = get_db_connection()
-                        cur = conn.cursor()
-                        cur.execute("DELETE FROM category_hierarchy WHERE type=? AND category=? AND sub_category=?", 
-                                    (v_type, cat_name, r['sub_category']))
-                        conn.commit()
-                        conn.close()
-                        st.rerun()
+        for large_name, l_group in v_df.groupby("cat_large"):
+            with st.expander(f"📁 [대분류] {large_name}"):
+                for mid_name, m_group in l_group.groupby("cat_mid"):
+                    st.markdown(f"**📂 {mid_name}**")
+                    for _, r in m_group.iterrows():
+                        c_t, c_d = st.columns([3, 1])
+                        c_t.text(f"  └ 🏷️ {r['cat_small']}")
+                        if c_d.button("삭제", key=f"del_h3_{v_type}_{large_name}_{mid_name}_{r['cat_small']}"):
+                            conn = get_db_connection()
+                            cur = conn.cursor()
+                            cur.execute("""
+                            DELETE FROM category_hierarchy_3tier 
+                            WHERE type=? AND cat_large=? AND cat_mid=? AND cat_small=?
+                            """, (v_type, large_name, mid_name, r['cat_small']))
+                            conn.commit()
+                            conn.close()
+                            st.rerun()
 
 # -------------------------------------------------------------
-# 메뉴 8: 🔒 비밀번호 변경
+# 메뉴 7: 🔒 비밀번호 변경
 # -------------------------------------------------------------
 elif menu == "🔒 비밀번호 변경":
     st.title("🔒 접속 비밀번호 변경")
