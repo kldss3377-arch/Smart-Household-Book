@@ -135,15 +135,16 @@ def init_db():
     if "source" not in v_cols: cur.execute("ALTER TABLE variable_records ADD COLUMN source TEXT DEFAULT '수기'")
     conn.commit()
 
-    # [핵심] 기존 DB에 년도가 잘못 들어가 있거나 누락된 행 날짜 기반 복구
+    # [핵심] DB 내 기존 레코드의 잘못된 년도/월 일괄 복구 쿼리
     cur.execute("""
     UPDATE variable_records 
-    SET year = CAST(SUBSTR(date, 1, 4) AS INTEGER) 
-    WHERE date LIKE '202%' AND (year IS NULL OR year = 2026 AND SUBSTR(date, 1, 4) != '2026')
+    SET year = CAST(SUBSTR(REPLACE(date, '-', '.'), 1, 4) AS INTEGER),
+        month = CAST(SUBSTR(REPLACE(date, '-', '.'), 6, 2) AS INTEGER)
+    WHERE date LIKE '202%' AND LENGTH(date) >= 7
     """)
     conn.commit()
 
-    # 기본 3단계 카테고리 시드 데이터
+    # 기본 3단계 카테고리 시드 데이터 주입
     cur.execute("SELECT COUNT(*) FROM category_hierarchy_3tier")
     if cur.fetchone()[0] == 0:
         base_3tier = [
@@ -170,7 +171,7 @@ def init_db():
         ]
         cur.executemany("INSERT OR IGNORE INTO category_hierarchy_3tier (type, cat_large, cat_mid, cat_small) VALUES (?, ?, ?, ?)", base_3tier)
 
-    # 기본 3계층 자동 분류 규칙
+    # 기본 3계층 자동 분류 규칙 주입
     cur.execute("SELECT COUNT(*) FROM auto_rules_3tier")
     if cur.fetchone()[0] == 0:
         base_rules = [
@@ -273,7 +274,7 @@ if not st.session_state.authenticated:
     st.stop()
 
 # -------------------------------------------------------------
-# 4. 데이터 조회 및 정밀 계산 함수 (순수 거래 데이터 기반)
+# 4. 데이터 조회 및 계산 함수
 # -------------------------------------------------------------
 def get_3tier_hierarchy(r_type=None):
     conn = get_db_connection()
@@ -314,13 +315,13 @@ def auto_classify_3tier(sender_receiver, memo, r_type, summary_field):
         return '기타소득', '기타수입', '기타'
     return '기타', '예비비', '기타지출'
 
-# 수지 집계 함수 (단일 연도: 1~12월, 전체: 2020~2026년도별)
+# 수지 집계 함수 (단일 연도: 1~12월, 전체: 2020~2026년)
 def calculate_summary(year_filter):
     df_var = get_variable_records(year_filter)
     
     if year_filter == "전체":
         summary = []
-        years_list = sorted([int(str(y).replace("년", "")) for y in ["2020년", "2021년", "2022년", "2023년", "2024년", "2025년", "2026년"]])
+        years_list = list(range(2020, 2027))
         accumulated_savings = 0
         for y in years_list:
             y_df = df_var[df_var['year'] == y] if not df_var.empty else pd.DataFrame()
@@ -842,11 +843,11 @@ elif menu == "📊 3단계 분류 심층 통계 분석":
             st.plotly_chart(fig_yoy, use_container_width=True)
 
 # -------------------------------------------------------------
-# 메뉴 4: 🏦 KB 국민은행 거래내역 엑셀 연동 (2020~2026 자동 연도 분류)
+# 메뉴 4: 🏦 KB 국민은행 거래내역 엑셀 연동 (2020~2026 연도 분리 & 초기화 동기화)
 # -------------------------------------------------------------
 elif menu == "🏦 KB 거래내역 엑셀 연동":
     st.title("🏦 KB국민은행 거래내역 엑셀 자동 연동 (3단계)")
-    st.info("국민은행 거래내역 엑셀 파일(`.xls` 또는 `.xlsx`)을 업로드하면 2020년부터 2026년까지의 연도와 월이 100% 자동 분리되며, 3단계 규칙에 따라 자동 분개됩니다.")
+    st.info("💡 국민은행 거래내역 엑셀 파일(`.xls` 또는 `.xlsx`)을 업로드하면 2020년부터 2026년까지의 연도와 월이 정확하게 자동 추출되며, 3단계 규칙에 따라 100% 자동 분개됩니다.")
 
     uploaded_file = st.file_uploader("KB국민은행 거래내역 엑셀 파일 업로드", type=["xls", "xlsx"])
     
@@ -881,7 +882,6 @@ elif menu == "🏦 KB 거래내역 엑셀 연동":
                     date_part = dt_obj.strftime('%Y-%m-%d')
                     time_part = dt_obj.strftime('%H:%M:%S')
                 except Exception:
-                    # 정규표현식 보조 추출
                     match = re.search(r'(\d{4})[^\d](\d{1,2})[^\d](\d{1,2})', dt_str)
                     if match:
                         rec_year = int(match.group(1))
@@ -903,7 +903,6 @@ elif menu == "🏦 KB 거래내역 엑셀 연동":
                     continue
                     
                 display_name = partner_val if partner_val and partner_val != 'nan' else summary_val
-                # 3단계 지능형 자동 분류
                 c_large, c_mid, c_small = auto_classify_3tier(partner_val, memo_val, rec_type, summary_val)
                 
                 parsed_rows.append({
@@ -930,14 +929,22 @@ elif menu == "🏦 KB 거래내역 엑셀 연동":
             st.markdown("**인식된 연도별 거래 건수 요약:**")
             st.write(dict(year_counts))
             
+            # 옵션: 기존 데이터 초기화 후 새로 동기화 체크박스
+            reset_mode = st.checkbox("⚠️️ 기존 KB국민은행 내역을 전체 삭제하고 새로 깨끗하게 동기화 (년도 꼬임 해결 시 권장)", value=True)
+            
             c_btn1, _ = st.columns([1, 2])
             with c_btn1:
-                if st.button("🚀 이 거래내역을 가계부에 일괄 동기화", use_container_width=True):
+                if st.button("🚀 이 거래내역을 가계부에 동기화하기", use_container_width=True):
                     conn = get_db_connection()
                     cur = conn.cursor()
                     
-                    existing_df = pd.read_sql("SELECT date, time, name, amount FROM variable_records WHERE source='KB국민'", conn)
-                    existing_keys = set(zip(existing_df['date'], existing_df['time'], existing_df['name'], existing_df['amount']))
+                    if reset_mode:
+                        cur.execute("DELETE FROM variable_records WHERE source='KB국민'")
+                        conn.commit()
+                        existing_keys = set()
+                    else:
+                        existing_df = pd.read_sql("SELECT date, time, name, amount FROM variable_records WHERE source='KB국민'", conn)
+                        existing_keys = set(zip(existing_df['date'], existing_df['time'], existing_df['name'], existing_df['amount']))
                     
                     inserted_cnt = 0
                     skipped_cnt = 0
@@ -956,7 +963,7 @@ elif menu == "🏦 KB 거래내역 엑셀 연동":
                         
                     conn.commit()
                     conn.close()
-                    st.success(f"동기화 완료: 신규 등록 {inserted_cnt}건 (중복 건너뜀 {skipped_cnt}건)")
+                    st.success(f"동기화 완료: 총 {inserted_cnt}건 신규 등록 (중복 건너뜀 {skipped_cnt}건)")
                     st.balloons()
         except Exception as e:
             st.error(f"파일 처리 중 오류가 발생했습니다: {e}")
@@ -1034,9 +1041,9 @@ elif menu == "⚙️ 지능형 자동분류 규칙 관리":
             st.info("등록된 규칙이 없습니다.")
 
 # -------------------------------------------------------------
-# 메뉴 6: 🏷️ 대/중/소분류 체계 관리
+# 메뉴 6: 🏷️️ 대/중/소분류 체계 관리
 # -------------------------------------------------------------
-elif menu == "🏷️ 대/중/소분류 체계 관리":
+elif menu == "🏷️️ 대/중/소분류 체계 관리":
     st.title("🏷️ 대분류 · 중분류 · 소분류 3단계 체계 관리")
     st.info("💡 가계부에서 사용할 3단계 분류 체계를 자유롭게 추가하거나 삭제할 수 있습니다.")
     
@@ -1093,7 +1100,7 @@ elif menu == "🏷️ 대/중/소분류 체계 관리":
                     st.markdown(f"**📂 {mid_name}**")
                     for _, r in m_group.iterrows():
                         c_t, c_d = st.columns([3, 1])
-                        c_t.text(f"  └ 🏷️️ {r['cat_small']}")
+                        c_t.text(f"  └ 🏷️ {r['cat_small']}")
                         if c_d.button("삭제", key=f"del_h3_{v_type}_{large_name}_{mid_name}_{r['cat_small']}"):
                             conn = get_db_connection()
                             cur = conn.cursor()
