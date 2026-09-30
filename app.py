@@ -5,9 +5,46 @@ import plotly.graph_objects as go
 import sqlite3
 import io
 
-st.set_page_config(page_title="스마트 가계부 & 연간 수지 분석기", page_icon="💰", layout="wide")
+# -------------------------------------------------------------
+# 1. 페이지 설정 및 로그인 인증 게이트웨이
+# -------------------------------------------------------------
+st.set_page_config(
+    page_title="스마트 가계부 & 자산 분석 시스템",
+    page_icon="💰",
+    layout="wide"
+)
 
-# --- SQLite DB 초기화 ---
+# 수정 코드 (로컬 및 웹 배포 환경 모두 안전하게 동작)
+try:
+    APP_PASSWORD = st.secrets.get("APP_PASSWORD", "1234")
+except Exception:
+    APP_PASSWORD = "1234"
+
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+def login_screen():
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    _, col_center, _ = st.columns([1, 1.2, 1])
+    with col_center:
+        st.markdown("### 🔐 스마트 가계부 로그인")
+        st.info("개인 금융 데이터 보호를 위해 비밀번호를 입력해 주세요.")
+        input_pw = st.text_input("접속 비밀번호", type="password", key="login_pw_input")
+        if st.button("로그인", use_container_width=True):
+            if input_pw == APP_PASSWORD:
+                st.session_state.authenticated = True
+                st.success("인증에 성공했습니다.")
+                st.rerun()
+            else:
+                st.error("비밀번호가 올바르지 않습니다.")
+
+if not st.session_state.authenticated:
+    login_screen()
+    st.stop()
+
+# -------------------------------------------------------------
+# 2. 로컬 SQLite DB 관리 함수
+# -------------------------------------------------------------
 def get_db_connection():
     conn = sqlite3.connect("household.db", check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -24,7 +61,7 @@ def init_db():
     cur.execute("""
     CREATE TABLE IF NOT EXISTS fixed_items (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        type TEXT, -- '수입' or '지출'
+        type TEXT,
         name TEXT,
         amount INTEGER,
         payment_method TEXT
@@ -33,7 +70,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS variable_records (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         month INTEGER,
-        type TEXT, -- '수입' or '지출'
+        type TEXT,
         date TEXT,
         name TEXT,
         amount INTEGER,
@@ -41,7 +78,7 @@ def init_db():
     )""")
     conn.commit()
 
-    # 초기 기본값 주입
+    # 초기 기본 데이터 주입
     cur.execute("SELECT COUNT(*) FROM categories")
     if cur.fetchone()[0] == 0:
         base_cats = ["급여", "식비", "외식", "교통", "차량", "쇼핑", "생활", "교육", "의료", "문화", "여가", "경조사", "기부", "급여외수입", "기타"]
@@ -79,7 +116,6 @@ def init_db():
 
 init_db()
 
-# --- DB 데이터 로드 함수 ---
 def get_categories():
     conn = get_db_connection()
     df = pd.read_sql("SELECT name FROM categories", conn)
@@ -98,7 +134,9 @@ def get_variable_records():
     conn.close()
     return df
 
-# --- 연간 요약 계산 함수 ---
+# -------------------------------------------------------------
+# 3. 수지 계산 함수 (총지출 = 고정지출 + 변동지출)
+# -------------------------------------------------------------
 def calculate_monthly_summary():
     df_fix = get_fixed_items()
     df_var = get_variable_records()
@@ -107,6 +145,7 @@ def calculate_monthly_summary():
     tot_fixed_exp = df_fix[df_fix['type'] == '지출']['amount'].sum()
     
     summary = []
+    accumulated_savings = 0
     for m in range(1, 13):
         m_df = df_var[df_var['month'] == m] if not df_var.empty else pd.DataFrame()
         var_inc = m_df[m_df['type'] == '수입']['amount'].sum() if not m_df.empty else 0
@@ -115,6 +154,7 @@ def calculate_monthly_summary():
         tot_inc = tot_fixed_inc + var_inc
         tot_exp = tot_fixed_exp + var_exp
         net_savings = tot_inc - tot_exp
+        accumulated_savings += net_savings
         savings_rate = (net_savings / tot_inc * 100) if tot_inc > 0 else 0
         
         summary.append({
@@ -124,15 +164,25 @@ def calculate_monthly_summary():
             "고정 지출": tot_fixed_exp,
             "변동 지출": var_exp,
             "당월 순저축": net_savings,
+            "누적 순저축": accumulated_savings,
             "저축률(%)": round(savings_rate, 2)
         })
     return pd.DataFrame(summary)
 
-# --- 사이드바 메뉴 ---
+# -------------------------------------------------------------
+# 4. 사이드바 메뉴 및 공통 작업
+# -------------------------------------------------------------
 st.sidebar.title("📌 가계부 시스템")
-menu = st.sidebar.radio("메뉴 선택", ["연간 통합 대시보드", "월별 수입/지출 내역 관리", "고정 수입/지출 관리", "분류(카테고리) 설정"])
+menu = st.sidebar.radio(
+    "메뉴 선택",
+    ["연간 통합 대시보드", "월별 수입/지출 내역 관리", "고정 수입/지출 관리", "분류(카테고리) 설정", "심층 통계 분석"]
+)
 
-# 엑셀 다운로드
+# 로그아웃 버튼
+if st.sidebar.button("🔒 로그아웃"):
+    st.session_state.authenticated = False
+    st.rerun()
+
 st.sidebar.divider()
 st.sidebar.subheader("💾 데이터 엑셀 내보내기")
 df_summary_export = calculate_monthly_summary()
@@ -154,7 +204,9 @@ st.sidebar.download_button(
     use_container_width=True
 )
 
-# --- 1. 연간 통합 대시보드 ---
+# -------------------------------------------------------------
+# 메뉴 1: 연간 통합 대시보드
+# -------------------------------------------------------------
 if menu == "연간 통합 대시보드":
     st.title("📊 연간 수입 / 지출 통합 대시보드")
     df_summary = calculate_monthly_summary()
@@ -200,10 +252,12 @@ if menu == "연간 통합 대시보드":
     st.subheader("📑 월별 상세 수지 분석표")
     st.dataframe(df_summary.style.format({
         "총 수입": "{:,}원", "총 지출": "{:,}원", "고정 지출": "{:,}원",
-        "변동 지출": "{:,}원", "당월 순저축": "{:,}원", "저축률(%)": "{:.2f}%"
+        "변동 지출": "{:,}원", "당월 순저축": "{:,}원", "누적 순저축": "{:,}원", "저축률(%)": "{:.2f}%"
     }), use_container_width=True)
 
-# --- 2. 월별 수입/지출 내역 관리 ---
+# -------------------------------------------------------------
+# 메뉴 2: 월별 수입/지출 내역 관리
+# -------------------------------------------------------------
 elif menu == "월별 수입/지출 내역 관리":
     selected_month = st.sidebar.selectbox("조회/관리할 월 선택", [f"{i}월" for i in range(1, 13)])
     month_int = int(selected_month.replace("월", ""))
@@ -233,7 +287,6 @@ elif menu == "월별 수입/지출 내역 관리":
     st.divider()
     current_categories = get_categories()
 
-    # 수정 폼
     if 'editing_record_id' not in st.session_state:
         st.session_state.editing_record_id = None
 
@@ -266,7 +319,6 @@ elif menu == "월별 수입/지출 내역 관리":
                     st.session_state.editing_record_id = None
                     st.rerun()
 
-    # 등록 폼
     st.subheader(f"➕ {selected_month} 새로운 내역 추가")
     with st.form("add_record_form", clear_on_submit=True):
         col_type, col_date, col_name, col_amt, col_cat = st.columns([1.2, 1.2, 2.5, 2, 1.8])
@@ -289,7 +341,6 @@ elif menu == "월별 수입/지출 내역 관리":
             else:
                 st.error("항목명과 유효한 금액을 입력해 주세요.")
 
-    # 목록
     st.subheader(f"📝 {selected_month} 등록 내역 목록")
     if not m_records.empty:
         h1, h2, h3, h4, h5, h6, h7 = st.columns([1.2, 1.2, 3, 2, 1.8, 1, 1])
@@ -314,7 +365,9 @@ elif menu == "월별 수입/지출 내역 관리":
     else:
         st.info("해당 월에 등록된 변동 내역이 없습니다.")
 
-# --- 3. 고정 수입/지출 관리 ---
+# -------------------------------------------------------------
+# 메뉴 3: 고정 수입/지출 관리
+# -------------------------------------------------------------
 elif menu == "고정 수입/지출 관리":
     st.title("⚙️ 고정 수입 및 고정 지출 설정")
     df_fix = get_fixed_items()
@@ -397,7 +450,9 @@ elif menu == "고정 수입/지출 관리":
                         conn.close()
                         st.rerun()
 
-# --- 4. 분류 설정 ---
+# -------------------------------------------------------------
+# 메뉴 4: 분류(카테고리) 설정
+# -------------------------------------------------------------
 elif menu == "분류(카테고리) 설정":
     st.title("🏷️ 분류(카테고리) 항목 설정")
     cats = get_categories()
@@ -445,3 +500,76 @@ elif menu == "분류(카테고리) 설정":
                             st.rerun()
                         else:
                             st.error("최소 1개 이상의 분류가 필요합니다.")
+
+# -------------------------------------------------------------
+# 메뉴 5: 심층 통계 분석 (신규 추가된 전문 차트 섹션)
+# -------------------------------------------------------------
+elif menu == "심층 통계 분석":
+    st.title("📈 가계 심층 통계 & 재무 분석")
+    df_summary = calculate_monthly_summary()
+    df_var = get_variable_records()
+    df_fix = get_fixed_items()
+    
+    # 1. 누적 자산(순저축) 형성 곡선 (Area Chart)
+    st.subheader("1️⃣ 누적 순저축 자산 형성 추이")
+    fig_cum = px.area(
+        df_summary, 
+        x="월", 
+        y="누적 순저축", 
+        title="연간 자산 누적 곡선 (단위: 원)",
+        color_discrete_sequence=["#00C853"]
+    )
+    fig_cum.update_traces(mode="lines+markers")
+    st.plotly_chart(fig_cum, use_container_width=True)
+    
+    col_chart1, col_chart2 = st.columns(2)
+    
+    with col_chart1:
+        # 2. 월별 저축률 트렌드 (Line + Threshold)
+        st.subheader("2️⃣ 월별 저축률(%) 변화 추이")
+        fig_rate = go.Figure()
+        fig_rate.add_trace(go.Scatter(
+            x=df_summary["월"], 
+            y=df_summary["저축률(%)"], 
+            mode='lines+markers+text',
+            text=df_summary["저축률(%)"].apply(lambda x: f"{x:.1f}%"),
+            textposition="top center",
+            line=dict(color="#2962FF", width=3),
+            name="저축률"
+        ))
+        # 평균 저축률 가이드 라인 추가
+        avg_rate = df_summary["저축률(%)"].mean()
+        fig_rate.add_hline(y=avg_rate, line_dash="dash", line_color="orange", annotation_text=f"연간 평균 ({avg_rate:.1f}%)")
+        fig_rate.update_layout(yaxis=dict(title="저축률 (%)", range=[0, 100]))
+        st.plotly_chart(fig_rate, use_container_width=True)
+
+    with col_chart2:
+        # 3. 변동 지출 카테고리별 누적 지출 랭킹 (Horizontal Bar)
+        st.subheader("3️⃣ 카테고리별 누적 지출 순위 (Top Spending)")
+        var_exp = df_var[df_var['type'] == '지출'] if not df_var.empty else pd.DataFrame()
+        if not var_exp.empty:
+            cat_ranked = var_exp.groupby("category")["amount"].sum().reset_index()
+            cat_ranked = cat_ranked.sort_values(by="amount", ascending=True)
+            fig_rank = px.bar(
+                cat_ranked, 
+                x="amount", 
+                y="category", 
+                orientation='h',
+                text="amount",
+                color="amount",
+                color_continuous_scale="Reds"
+            )
+            fig_rank.update_traces(texttemplate='%{text:,}원', textposition='outside')
+            fig_rank.update_layout(xaxis_title="총 지출액 (원)", yaxis_title="분류", coloraxis_showscale=False)
+            st.plotly_chart(fig_rank, use_container_width=True)
+        else:
+            st.info("지출 내역이 충분하지 않습니다.")
+
+    # 4. 결제 수단별 고정 지출 분포
+    st.subheader("4️⃣ 고정 지출 결제 방식 비중")
+    fix_exp = df_fix[df_fix['type'] == '지출']
+    if not fix_exp.empty:
+        pay_sum = fix_exp.groupby("payment_method")["amount"].sum().reset_index()
+        fig_pay = px.bar(pay_sum, x="payment_method", y="amount", text="amount", color="payment_method", title="결제 수단별 월 고정지출액")
+        fig_pay.update_traces(texttemplate='%{text:,}원', textposition='outside')
+        st.plotly_chart(fig_pay, use_container_width=True)
