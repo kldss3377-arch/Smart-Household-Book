@@ -6,45 +6,14 @@ import sqlite3
 import io
 
 # -------------------------------------------------------------
-# 1. 페이지 설정 및 로그인 인증 게이트웨이
+# 1. 페이지 설정
 # -------------------------------------------------------------
 st.set_page_config(
-    page_title="스마트 가계부 & KB 거래내역 자동연동",
+    page_title="스마트 가계부 & 자산 분석 시스템",
     page_icon="💰",
     layout="wide"
 )
 
-# 비밀번호 보안 처리 (Streamlit Secrets 미설정 시에도 에러 없이 1234 기본 적용)
-try:
-    APP_PASSWORD = st.secrets.get("APP_PASSWORD", "*kwag3377*")
-except Exception:
-    APP_PASSWORD = "*kwag3377"
-
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
-
-def login_screen():
-    st.markdown("<br><br>", unsafe_allow_html=True)
-    _, col_center, _ = st.columns([1, 1.2, 1])
-    with col_center:
-        st.markdown("### 🔐 스마트 가계부 로그인")
-        st.info("안전한 금융 데이터 관리를 위해 접속 비밀번호를 입력해 주세요.")
-        input_pw = st.text_input("접속 비밀번호", type="password", key="login_pw_input")
-        if st.button("로그인", use_container_width=True):
-            if input_pw == APP_PASSWORD:
-                st.session_state.authenticated = True
-                st.success("인증 완료되었습니다.")
-                st.rerun()
-            else:
-                st.error("비밀번호가 올바르지 않습니다.")
-
-if not st.session_state.authenticated:
-    login_screen()
-    st.stop()
-
-# -------------------------------------------------------------
-# 2. SQLite DB 초기화 및 누락 컬럼 자동 보정
-# -------------------------------------------------------------
 DB_PATH = "household.db"
 
 def get_db_connection():
@@ -52,9 +21,24 @@ def get_db_connection():
     conn.row_factory = sqlite3.Row
     return conn
 
+# -------------------------------------------------------------
+# 2. SQLite DB 초기화 및 안전 마이그레이션
+# -------------------------------------------------------------
 def init_db():
     conn = get_db_connection()
     cur = conn.cursor()
+    
+    # 0) 시스템 설정 테이블 (비밀번호 영구 저장)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    )""")
+    
+    # 기본 비밀번호 '1234' 주입 (없는 경우에만)
+    cur.execute("SELECT value FROM settings WHERE key='app_password'")
+    if cur.fetchone() is None:
+        cur.execute("INSERT INTO settings (key, value) VALUES ('app_password', '1234')")
     
     # 1) 카테고리 테이블
     cur.execute("""
@@ -73,7 +57,7 @@ def init_db():
         payment_method TEXT
     )""")
     
-    # 3) 거래 내역 테이블 생성 (기존 테이블이 없을 때 생성)
+    # 3) 거래 내역 테이블
     cur.execute("""
     CREATE TABLE IF NOT EXISTS variable_records (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -87,12 +71,20 @@ def init_db():
         memo TEXT DEFAULT '',
         source TEXT DEFAULT '수기'
     )""")
+    
+    # 4) 지능형 자동 분류 키워드 규칙 테이블
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS auto_rules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        category TEXT,
+        keyword TEXT UNIQUE,
+        rule_type TEXT DEFAULT '지출'
+    )""")
     conn.commit()
 
-    # --- 기존 DB 파일 누락 컬럼 강제 보정 (Auto-Migration) ---
+    # 컬럼 누락 방어 로직 (마이그레이션)
     cur.execute("PRAGMA table_info(variable_records)")
     existing_cols = [row[1] for row in cur.fetchall()]
-    
     if "time" not in existing_cols:
         cur.execute("ALTER TABLE variable_records ADD COLUMN time TEXT DEFAULT ''")
     if "memo" not in existing_cols:
@@ -121,27 +113,78 @@ def init_db():
         ]
         cur.executemany("INSERT INTO fixed_items (type, name, amount, payment_method) VALUES (?, ?, ?, ?)", base_fixed)
 
-    # 기본 거래 내역 주입
-    cur.execute("SELECT COUNT(*) FROM variable_records")
+    # 기본 자동 분류 규칙 주입
+    cur.execute("SELECT COUNT(*) FROM auto_rules")
     if cur.fetchone()[0] == 0:
-        base_vars = [
-            (1, '수입', '01-10', '', '연말정산 환급', 350000, '기타수입', '', '수기'),
-            (1, '수입', '01-20', '', '중고물품 판매', 50000, '기타', '', '수기'),
-            (1, '지출', '01-03', '', '식자재 및 장보기', 185000, '식비', '', '수기'),
-            (1, '지출', '01-07', '', '주말 가족외식', 92000, '외식', '', '수기'),
-            (1, '지출', '01-12', '', '주유비', 85000, '교통', '', '수기'),
-            (1, '지출', '01-15', '', '겨울 외투 구매', 160000, '쇼핑', '', '수기'),
-            (1, '지출', '01-18', '', '도서 구입', 35000, '문화', '', '수기'),
-            (1, '지출', '01-25', '', '생활용품 구매', 48000, '생활', '', '수기')
+        base_rules = [
+            ('급여', '천안논산고속도로', '수입'), ('급여', '급여', '수입'), ('급여', '상여', '수입'), ('급여', '월급', '수입'), ('급여', '성과급', '수입'),
+            ('기타수입', '이자', '수입'), ('기타수입', '환급', '수입'), ('기타수입', '배당', '수입'), ('기타수입', '중고', '수입'),
+            ('기부', '홀트', '지출'), ('기부', '국경없는의사회', '지출'), ('기부', '초록우산', '지출'), ('기부', '유니세프', '지출'), ('기부', '후원', '지출'),
+            ('금융/카드', '국민카드', '지출'), ('금융/카드', '신한카드', '지출'), ('금융/카드', '삼성카드', '지출'), ('금융/카드', '현대카드', '지출'),
+            ('금융/카드', '보험', '지출'), ('금융/카드', '생명', '지출'), ('금융/카드', '화재', '지출'), ('금융/카드', '대출이자', '지출'),
+            ('식비', '마트', '지출'), ('식비', '하나로', '지출'), ('식비', '농협', '지출'), ('식비', '이마트', '지출'), ('식비', '홈플러스', '지출'), ('식비', '파머스', '지출'), ('식비', '식자재', '지출'),
+            ('외식', '식당', '지출'), ('외식', '카페', '지출'), ('외식', '이디야', '지출'), ('외식', '스타벅스', '지출'), ('외식', '커피', '지출'), ('외식', '회란', '지출'), ('외식', '디저트', '지출'), ('외식', '휴게소', '지출'),
+            ('교통', '주유소', '지출'), ('교통', '오일', '지출'), ('교통', '하이패스', '지출'), ('교통', '통행료', '지출'), ('교통', '택시', '지출'), ('교통', '코레일', '지출'),
+            ('차량', '정비', '지출'), ('차량', '카센터', '지출'), ('차량', '타이어', '지출'), ('차량', '세차', '지출'),
+            ('의료', '병원', '지출'), ('의료', '약국', '지출'), ('의료', '의원', '지출'), ('의료', '치과', '지출'), ('의료', '동물병원', '지출'),
+            ('교육', '학원', '지출'), ('교육', '학교', '지출'), ('교육', '서점', '지출'), ('교육', '도서', '지출'),
+            ('쇼핑', '다이소', '지출'), ('쇼핑', '올리브영', '지출'), ('쇼핑', '쿠팡', '지출'), ('쇼핑', '네이버페이', '지출'), ('쇼핑', '아울렛', '지출'),
+            ('생활', '관리비', '지출'), ('생활', '도시가스', '지출'), ('생활', '전기요금', '지출'), ('생활', '통신', '지출'),
+            ('문화', '영화', '지출'), ('문화', 'cgv', '지출'), ('문화', '넷플릭스', '지출'), ('문화', '유튜브', '지출'),
+            ('여가', '골프', '지출'), ('여가', '헬스', '지출'), ('여가', '호텔', '지출'), ('여가', '여행', '지출'),
+            ('경조사', '축의', '지출'), ('경조사', '부의', '지출'), ('경조사', '경조', '지출')
         ]
-        cur.executemany("INSERT INTO variable_records (month, type, date, time, name, amount, category, memo, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", base_vars)
+        cur.executemany("INSERT OR IGNORE INTO auto_rules (category, keyword, rule_type) VALUES (?, ?, ?)", base_rules)
 
     conn.commit()
     conn.close()
 
-# 앱 실행 시 DB 즉시 초기화
 init_db()
 
+# -------------------------------------------------------------
+# 3. 비밀번호 관리 및 로그인 게이트웨이
+# -------------------------------------------------------------
+def get_stored_password():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT value FROM settings WHERE key='app_password'")
+    row = cur.fetchone()
+    conn.close()
+    return row[0] if row else "1234"
+
+def update_stored_password(new_pw):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("UPDATE settings SET value=? WHERE key='app_password'", (new_pw,))
+    conn.commit()
+    conn.close()
+
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+def login_screen():
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    _, col_center, _ = st.columns([1, 1.2, 1])
+    with col_center:
+        st.markdown("### 🔐 스마트 가계부 로그인")
+        st.info("안전한 금융 데이터 관리를 위해 접속 비밀번호를 입력해 주세요. (초기 기본값: 1234)")
+        input_pw = st.text_input("접속 비밀번호", type="password", key="login_pw_input")
+        if st.button("로그인", use_container_width=True):
+            current_pw = get_stored_password()
+            if input_pw == current_pw:
+                st.session_state.authenticated = True
+                st.success("인증 완료되었습니다.")
+                st.rerun()
+            else:
+                st.error("비밀번호가 올바르지 않습니다.")
+
+if not st.session_state.authenticated:
+    login_screen()
+    st.stop()
+
+# -------------------------------------------------------------
+# 4. 데이터베이스 헬퍼 함수
+# -------------------------------------------------------------
 def get_categories():
     conn = get_db_connection()
     df = pd.read_sql("SELECT name FROM categories", conn)
@@ -156,79 +199,35 @@ def get_fixed_items():
 
 def get_variable_records():
     conn = get_db_connection()
-    # 컬럼 존재 여부를 런타임에 동적으로 체크하여 쿼리 안전성 확보
     cur = conn.cursor()
     cur.execute("PRAGMA table_info(variable_records)")
     cols = [r[1] for r in cur.fetchall()]
-    
-    if "time" in cols:
-        query = "SELECT * FROM variable_records ORDER BY date DESC, time DESC, id DESC"
-    else:
-        query = "SELECT * FROM variable_records ORDER BY date DESC, id DESC"
-        
-    df = pd.read_sql(query, conn)
-    
-    # DataFrame에 누락된 필드가 있다면 안전하게 생성
-    if "time" not in df.columns:
-        df["time"] = ""
-    if "memo" not in df.columns:
-        df["memo"] = ""
-    if "source" not in df.columns:
-        df["source"] = "수기"
-        
+    order_clause = "ORDER BY date DESC, time DESC, id DESC" if "time" in cols else "ORDER BY date DESC, id DESC"
+    df = pd.read_sql(f"SELECT * FROM variable_records {order_clause}", conn)
+    if "time" not in df.columns: df["time"] = ""
+    if "memo" not in df.columns: df["memo"] = ""
+    if "source" not in df.columns: df["source"] = "수기"
     conn.close()
     return df
 
-# -------------------------------------------------------------
-# 3. KB 국민은행 거래내역 지능형 자동 분류 엔진
-# -------------------------------------------------------------
+def get_auto_rules():
+    conn = get_db_connection()
+    df = pd.read_sql("SELECT * FROM auto_rules ORDER BY category ASC, keyword ASC", conn)
+    conn.close()
+    return df
+
 def auto_classify_kb_record(sender_receiver, memo, r_type, summary_field):
     text = f"{str(sender_receiver)} {str(memo)} {str(summary_field)}".lower()
+    rules_df = get_auto_rules()
     
-    if r_type == '수입':
-        if any(k in text for k in ['천안논산고속도로', '급여', '상여', '월급', '성과급']):
-            return '급여'
-        elif any(k in text for k in ['이자', '환급', '배당', '중고']):
-            return '기타수입'
-        return '기타수입'
-    
-    # 지출 자동 분류 룰
-    if any(k in text for k in ['홀트', '국경없는의사회', '초록우산', '유니세프', '기부', '후원']):
-        return '기부'
-    if any(k in text for k in ['보험', '생명', '화재', '해상', '손해']):
-        return '금융/카드'
-    if any(k in text for k in ['카드', '국민카드', '신한카드', '삼성카드', '현대카드', '롯데카드', '비씨카드']):
-        return '금융/카드'
-    if any(k in text for k in ['대출', '이자', '상환']):
-        return '금융/카드'
-    if any(k in text for k in ['마트', '하나로', '농협', '이마트', '홈플러스', '슈퍼', '파머스', '청과', '정육', '식자재']):
-        return '식비'
-    if any(k in text for k in ['식당', '카페', '이디야', '스타벅스', '커피', '회란', '디저트', '음식점', '베이커리', '치킨', '피자', '포차', '외식', '휴게소']):
-        return '외식'
-    if any(k in text for k in ['주유소', '오일', '하이패스', '통행료', '지하철', '버스', '택시', '코레일', 'srt', '교통']):
-        return '교통'
-    if any(k in text for k in ['정비', '카센터', '타이어', '세차', '주차']):
-        return '차량'
-    if any(k in text for k in ['병원', '약국', '의원', '치과', '한의원', '동물병원', '메디컬']):
-        return '의료'
-    if any(k in text for k in ['학원', '학교', '문구', '서점', '도서', '교재']):
-        return '교육'
-    if any(k in text for k in ['다이소', '올리브영', '쿠팡', '네이버페이', '쇼핑', '아울렛', '백화점', '의류', '패션']):
-        return '쇼핑'
-    if any(k in text for k in ['아파트', '관리비', '도시가스', '한전', '전기요금', '수도', '통신', 'kt', 'skt', 'lgu+']):
-        return '생활'
-    if any(k in text for k in ['영화', 'cgv', '넷플릭스', '유튜브', '공연', '전시']):
-        return '문화'
-    if any(k in text for k in ['골프', '피트니스', '헬스', '숙박', '호텔', '여행', '항공']):
-        return '여가'
-    if any(k in text for k in ['축의', '부의', '경조', '화환']):
-        return '경조사'
-    
-    return '기타'
+    filtered_rules = rules_df[rules_df['rule_type'] == r_type]
+    for _, rule in filtered_rules.iterrows():
+        kw = str(rule['keyword']).lower().strip()
+        if kw and kw in text:
+            return rule['category']
+            
+    return '기타수입' if r_type == '수입' else '기타'
 
-# -------------------------------------------------------------
-# 4. 연간 수지 분석 계산 함수
-# -------------------------------------------------------------
 def calculate_monthly_summary():
     df_fix = get_fixed_items()
     df_var = get_variable_records()
@@ -261,16 +260,47 @@ def calculate_monthly_summary():
         })
     return pd.DataFrame(summary)
 
+def generate_category_pivot():
+    df_var = get_variable_records()
+    exp_df = df_var[df_var['type'] == '지출'] if not df_var.empty else pd.DataFrame()
+    all_cats = [c for c in get_categories() if c not in ['급여', '기타수입']]
+    
+    if exp_df.empty:
+        pivot = pd.DataFrame(index=all_cats, columns=[f"{i}월" for i in range(1, 13)]).fillna(0)
+    else:
+        pivot = exp_df.pivot_table(index='category', columns='month', values='amount', aggfunc='sum', fill_value=0)
+        for m in range(1, 13):
+            if m not in pivot.columns:
+                pivot[m] = 0
+        pivot = pivot[[m for m in range(1, 13)]]
+        pivot.columns = [f"{m}월" for m in range(1, 13)]
+        for c in all_cats:
+            if c not in pivot.index:
+                pivot.loc[c] = 0
+                
+    pivot['연간 합계'] = pivot.sum(axis=1)
+    pivot = pivot.sort_values(by='연간 합계', ascending=False)
+    return pivot
+
 # -------------------------------------------------------------
 # 5. 사이드바 메뉴 및 백업
 # -------------------------------------------------------------
 st.sidebar.title("📌 가계부 시스템")
 menu = st.sidebar.radio(
     "메뉴 선택",
-    ["연간 통합 대시보드", "월별 수입/지출 내역 관리", "🏦 KB 거래내역 엑셀 연동", "고정 수입/지출 관리", "분류(카테고리) 설정", "심층 통계 분석"]
+    [
+        "연간 통합 대시보드", 
+        "월별 수입/지출 내역 관리", 
+        "📊 분류 항목별 통계 분석", 
+        "🏦 KB 거래내역 엑셀 연동", 
+        "⚙️ 지능형 자동분류 규칙 관리", 
+        "고정 수입/지출 관리", 
+        "분류(카테고리) 설정",
+        "🔒 비밀번호 변경"
+    ]
 )
 
-if st.sidebar.button("🔒 로그아웃"):
+if st.sidebar.button("🚪 로그아웃"):
     st.session_state.authenticated = False
     st.rerun()
 
@@ -279,18 +309,23 @@ st.sidebar.subheader("💾 데이터 엑셀 내보내기")
 df_summary_export = calculate_monthly_summary()
 df_var_all = get_variable_records()
 df_fix_all = get_fixed_items()
+df_pivot_export = generate_category_pivot().reset_index().rename(columns={'category': '분류항목'})
+df_rules_export = get_auto_rules()
+
 output = io.BytesIO()
 with pd.ExcelWriter(output, engine='openpyxl') as writer:
-    df_summary_export.to_excel(writer, sheet_name='연간요약', index=False)
+    df_summary_export.to_excel(writer, sheet_name='연간수지요약', index=False)
+    df_pivot_export.to_excel(writer, sheet_name='카테고리별_월별통계', index=False)
     if not df_var_all.empty:
         df_var_all.to_excel(writer, sheet_name='거래내역전체', index=False)
     df_fix_all.to_excel(writer, sheet_name='고정항목설정', index=False)
+    df_rules_export.to_excel(writer, sheet_name='자동분류_키워드설정', index=False)
     pd.DataFrame({"분류명": get_categories()}).to_excel(writer, sheet_name='분류목록', index=False)
 
 st.sidebar.download_button(
     label="현재 가계부 엑셀 다운로드",
     data=output.getvalue(),
-    file_name="가계부_연간_관리대장_통합본.xlsx",
+    file_name="가계부_연간_통합분석대장.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     use_container_width=True
 )
@@ -458,27 +493,82 @@ elif menu == "월별 수입/지출 내역 관리":
         st.info("해당 월에 등록된 거래 내역이 없습니다.")
 
 # -------------------------------------------------------------
-# 메뉴 3: 🏦 KB 국민은행 거래내역 엑셀 연동
+# 메뉴 3: 📊 분류 항목별 통계 분석
+# -------------------------------------------------------------
+elif menu == "📊 분류 항목별 통계 분석":
+    st.title("📊 분류 항목별 심층 통계 및 시각화")
+    st.info("KB 자동 분류 엔진 및 수기 등록을 통해 집계된 카테고리별 다차원 시각화 차트와 피벗 분석표입니다.")
+    
+    df_var = get_variable_records()
+    exp_df = df_var[df_var['type'] == '지출'] if not df_var.empty else pd.DataFrame()
+    
+    if exp_df.empty:
+        st.warning("등록된 지출 거래 내역이 없습니다.")
+    else:
+        top_cat = exp_df.groupby("category")["amount"].sum().idxmax()
+        top_cat_amt = exp_df.groupby("category")["amount"].sum().max()
+        total_exp_amt = exp_df["amount"].sum()
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("총 변동 지출액", f"{total_exp_amt:,} 원")
+        c2.metric("최다 지출 카테고리", f"{top_cat}")
+        c3.metric(f"최다 카테고리 지출액 ({top_cat})", f"{top_cat_amt:,} 원", delta=f"{(top_cat_amt/total_exp_amt*100):.1f}% 비중")
+        
+        st.divider()
+        
+        c_chart1, c_chart2 = st.columns(2)
+        with c_chart1:
+            cat_sum = exp_df.groupby("category")["amount"].sum().reset_index()
+            fig_pie = px.pie(cat_sum, names="category", values="amount", title="카테고리별 지출 비중 (도넛 차트)", hole=0.45)
+            st.plotly_chart(fig_pie, use_container_width=True)
+            
+        with c_chart2:
+            cat_ranked = cat_sum.sort_values(by="amount", ascending=True)
+            fig_rank = px.bar(cat_ranked, x="amount", y="category", orientation='h', text="amount", color="amount", color_continuous_scale="Viridis", title="카테고리별 누적 지출 랭킹 (원)")
+            fig_rank.update_traces(texttemplate='%{text:,}원', textposition='outside')
+            fig_rank.update_layout(xaxis_title="총 지출액 (원)", yaxis_title="분류", coloraxis_showscale=False)
+            st.plotly_chart(fig_rank, use_container_width=True)
+            
+        st.subheader("📈 월별 카테고리별 지출 누적 추이")
+        exp_df['월_표시'] = exp_df['month'].apply(lambda x: f"{x}월")
+        month_order = [f"{i}월" for i in range(1, 13)]
+        
+        fig_stack = px.bar(exp_df, x="월_표시", y="amount", color="category", title="월별 지출 구성 추이 (Stacked Bar Chart)", category_orders={"월_표시": month_order})
+        fig_stack.update_layout(barmode="stack", xaxis_title="월", yaxis_title="지출 합계 (원)", hovermode="x unified")
+        st.plotly_chart(fig_stack, use_container_width=True)
+        
+        st.subheader("🔥 월별 × 카테고리 지출 히트맵")
+        pivot_raw = exp_df.pivot_table(index='category', columns='month', values='amount', aggfunc='sum', fill_value=0)
+        for m in range(1, 13):
+            if m not in pivot_raw.columns: pivot_raw[m] = 0
+        pivot_raw = pivot_raw[[m for m in range(1, 13)]]
+        pivot_raw.columns = [f"{m}월" for m in range(1, 13)]
+        
+        fig_heat = px.imshow(pivot_raw, labels=dict(x="월", y="카테고리", color="지출액(원)"), x=pivot_raw.columns, y=pivot_raw.index, aspect="auto", color_continuous_scale="Reds", title="카테고리별 월별 지출 집중도 히트맵")
+        st.plotly_chart(fig_heat, use_container_width=True)
+        
+        st.subheader("📑 분류 항목별 상세 분석 시트 (피벗 분석표)")
+        pivot_display = generate_category_pivot()
+        format_dict = {col: "{:,}원" for col in pivot_display.columns}
+        st.dataframe(pivot_display.style.format(format_dict), use_container_width=True)
+
+# -------------------------------------------------------------
+# 메뉴 4: 🏦 KB 국민은행 거래내역 엑셀 연동
 # -------------------------------------------------------------
 elif menu == "🏦 KB 거래내역 엑셀 연동":
     st.title("🏦 KB국민은행 거래내역 엑셀 자동 연동")
-    st.info("국민은행 인터넷뱅킹에서 다운로드한 '거래내역조회 엑셀 파일'(`.xls` 또는 `.xlsx`)을 업로드하면 자동으로 가계부에 반영됩니다.")
+    st.info("국민은행 인터넷뱅킹에서 다운로드한 '거래내역조회 엑셀 파일'(`.xls` 또는 `.xlsx`)을 업로드하면 지능형 분류 엔진에 따라 자동으로 가계부에 반영됩니다.")
 
     uploaded_file = st.file_uploader("KB국민은행 거래내역 엑셀 파일 업로드", type=["xls", "xlsx"])
     
     if uploaded_file is not None:
         try:
-            # KB 양식: 4행(인덱스 3)부터 테이블 헤더 시작
             df_kb_raw = pd.read_excel(uploaded_file, skiprows=3)
-            
-            # 첫 번째 컬럼이 Unnamed인 경우 헤더 재설정
             if 'Unnamed: 0' in df_kb_raw.columns:
                 df_kb_raw.columns = df_kb_raw.iloc[0]
                 df_kb_raw = df_kb_raw.iloc[1:].reset_index(drop=True)
                 
-            # 합계 행 및 빈 행 제거
             df_kb = df_kb_raw[df_kb_raw['거래일시'].notna() & (df_kb_raw['거래일시'] != '합계')].copy()
-            
             st.success(f"파일 파싱 성공: 총 {len(df_kb)}건의 거래 내역을 인식했습니다.")
             
             parsed_rows = []
@@ -488,13 +578,11 @@ elif menu == "🏦 KB 거래내역 엑셀 연동":
                 partner_val = str(r.get('보낸분/받는분', '')).strip()
                 memo_val = str(r.get('송금메모', '')).strip()
                 
-                # 금액 정제
                 w_val = str(r.get('출금액', 0)).replace(',', '').split('.')[0]
                 d_val = str(r.get('입금액', 0)).replace(',', '').split('.')[0]
                 withdraw_amt = int(w_val) if w_val.isdigit() else 0
                 deposit_amt = int(d_val) if d_val.isdigit() else 0
                 
-                # 날짜 및 시간 분리
                 date_part = dt_str.split(' ')[0] if ' ' in dt_str else dt_str
                 time_part = dt_str.split(' ')[1] if ' ' in dt_str else ''
                 
@@ -528,7 +616,7 @@ elif menu == "🏦 KB 거래내역 엑셀 연동":
                 })
             
             preview_df = pd.DataFrame(parsed_rows)
-            st.subheader("👀 분류 및 분개 미리보기")
+            st.subheader("👀 지능형 분류 및 분개 미리보기")
             st.dataframe(preview_df[["date", "type", "name", "amount", "category", "memo"]].head(15).style.format({"amount": "{:,}원"}), use_container_width=True)
             
             c_btn1, _ = st.columns([1, 2])
@@ -537,7 +625,6 @@ elif menu == "🏦 KB 거래내역 엑셀 연동":
                     conn = get_db_connection()
                     cur = conn.cursor()
                     
-                    # 중복 방지를 위한 기존 거래 로드
                     existing_df = pd.read_sql("SELECT date, time, name, amount FROM variable_records WHERE source='KB국민'", conn)
                     existing_keys = set(zip(existing_df['date'], existing_df['time'], existing_df['name'], existing_df['amount']))
                     
@@ -564,7 +651,67 @@ elif menu == "🏦 KB 거래내역 엑셀 연동":
             st.error(f"파일 처리 중 오류가 발생했습니다: {e}")
 
 # -------------------------------------------------------------
-# 메뉴 4: 고정 수입/지출 관리
+# 메뉴 5: ⚙️ 지능형 자동분류 규칙 관리
+# -------------------------------------------------------------
+elif menu == "⚙️ 지능형 자동분류 규칙 관리":
+    st.title("⚙️ KB 지능형 자동 분류 규칙(키워드) 관리")
+    st.info("💡 이곳에서 거래처/적요 키워드를 등록하면, 국민은행 엑셀을 업로드할 때 해당 분류로 자동 지정됩니다.")
+    
+    categories = get_categories()
+    rules_df = get_auto_rules()
+    
+    col_r_add, col_r_list = st.columns([1, 1.5])
+    
+    with col_r_add:
+        st.subheader("➕ 새 자동분류 키워드 등록")
+        with st.form("add_rule_form", clear_on_submit=True):
+            r_type = st.selectbox("구분", ["지출", "수입"])
+            r_cat = st.selectbox("매핑할 카테고리(분류)", categories)
+            r_kw = st.text_input("매칭 키워드 (예: 스타벅스, 올리브영, GS25)")
+            
+            if st.form_submit_button("키워드 규칙 추가", use_container_width=True):
+                if r_kw.strip():
+                    try:
+                        conn = get_db_connection()
+                        cur = conn.cursor()
+                        cur.execute("INSERT INTO auto_rules (category, keyword, rule_type) VALUES (?, ?, ?)", 
+                                    (r_cat, r_kw.strip().lower(), r_type))
+                        conn.commit()
+                        conn.close()
+                        st.success(f"키워드 '{r_kw.strip()}' -> [{r_cat}] 규칙이 등록되었습니다.")
+                        st.rerun()
+                    except sqlite3.IntegrityError:
+                        st.warning("이미 등록되어 있는 키워드입니다.")
+                else:
+                    st.error("키워드를 입력해 주세요.")
+                    
+    with col_r_list:
+        st.subheader(f"📋 등록된 자동 분류 규칙 (총 {len(rules_df)}개)")
+        selected_cat_filter = st.selectbox("카테고리별 필터", ["전체 보기"] + categories)
+        
+        display_rules = rules_df if selected_cat_filter == "전체 보기" else rules_df[rules_df['category'] == selected_cat_filter]
+        
+        if not display_rules.empty:
+            h1, h2, h3, h4 = st.columns([1, 2, 3, 1])
+            h1.markdown("**구분**"); h2.markdown("**분류**"); h3.markdown("**매칭 키워드**"); h4.markdown("**삭제**")
+            
+            for _, r in display_rules.iterrows():
+                c1, c2, c3, c4 = st.columns([1, 2, 3, 1])
+                c1.text(r['rule_type'])
+                c2.text(r['category'])
+                c3.markdown(f"`{r['keyword']}`")
+                if c4.button("🗑", key=f"del_rule_{r['id']}"):
+                    conn = get_db_connection()
+                    cur = conn.cursor()
+                    cur.execute("DELETE FROM auto_rules WHERE id=?", (int(r['id']),))
+                    conn.commit()
+                    conn.close()
+                    st.rerun()
+        else:
+            st.info("등록된 규칙이 없습니다.")
+
+# -------------------------------------------------------------
+# 메뉴 6: 고정 수입/지출 관리
 # -------------------------------------------------------------
 elif menu == "고정 수입/지출 관리":
     st.title("⚙️ 고정 수입 및 고정 지출 설정")
@@ -649,7 +796,7 @@ elif menu == "고정 수입/지출 관리":
                         st.rerun()
 
 # -------------------------------------------------------------
-# 메뉴 5: 분류(카테고리) 설정
+# 메뉴 7: 분류(카테고리) 설정
 # -------------------------------------------------------------
 elif menu == "분류(카테고리) 설정":
     st.title("🏷️ 분류(카테고리) 항목 설정")
@@ -684,6 +831,7 @@ elif menu == "분류(카테고리) 설정":
                             cur = conn.cursor()
                             cur.execute("UPDATE categories SET name=? WHERE name=?", (renamed.strip(), c))
                             cur.execute("UPDATE variable_records SET category=? WHERE category=?", (renamed.strip(), c))
+                            cur.execute("UPDATE auto_rules SET category=? WHERE category=?", (renamed.strip(), c))
                             conn.commit()
                             conn.close()
                             st.rerun()
@@ -693,6 +841,7 @@ elif menu == "분류(카테고리) 설정":
                             cur = conn.cursor()
                             cur.execute("DELETE FROM categories WHERE name=?", (c,))
                             cur.execute("UPDATE variable_records SET category='기타' WHERE category=?", (c,))
+                            cur.execute("DELETE FROM auto_rules WHERE category=?", (c,))
                             conn.commit()
                             conn.close()
                             st.rerun()
@@ -700,60 +849,30 @@ elif menu == "분류(카테고리) 설정":
                             st.error("최소 1개 이상의 분류가 필요합니다.")
 
 # -------------------------------------------------------------
-# 메뉴 6: 심층 통계 분석
+# 메뉴 8: 🔒 비밀번호 변경 (신규 추가)
 # -------------------------------------------------------------
-elif menu == "심층 통계 분석":
-    st.title("📈 가계 심층 통계 & 재무 분석")
-    df_summary = calculate_monthly_summary()
-    df_var = get_variable_records()
-    df_fix = get_fixed_items()
+elif menu == "🔒 비밀번호 변경":
+    st.title("🔒 접속 비밀번호 변경")
+    st.info("가계부 접속 시 사용하는 비밀번호를 안전하게 변경할 수 있습니다. 변경된 비밀번호는 데이터베이스에 영구 저장됩니다.")
     
-    st.subheader("1️⃣ 누적 순저축 자산 형성 추이")
-    fig_cum = px.area(
-        df_summary, 
-        x="월", 
-        y="누적 순저축", 
-        title="연간 자산 누적 곡선 (단위: 원)",
-        color_discrete_sequence=["#00C853"]
-    )
-    fig_cum.update_traces(mode="lines+markers")
-    st.plotly_chart(fig_cum, use_container_width=True)
-    
-    col_chart1, col_chart2 = st.columns(2)
-    with col_chart1:
-        st.subheader("2️⃣ 월별 저축률(%) 변화 추이")
-        fig_rate = go.Figure()
-        fig_rate.add_trace(go.Scatter(
-            x=df_summary["월"], 
-            y=df_summary["저축률(%)"], 
-            mode='lines+markers+text',
-            text=df_summary["저축률(%)"].apply(lambda x: f"{x:.1f}%"),
-            textposition="top center",
-            line=dict(color="#2962FF", width=3),
-            name="저축률"
-        ))
-        avg_rate = df_summary["저축률(%)"].mean()
-        fig_rate.add_hline(y=avg_rate, line_dash="dash", line_color="orange", annotation_text=f"연간 평균 ({avg_rate:.1f}%)")
-        fig_rate.update_layout(yaxis=dict(title="저축률 (%)", range=[0, 100]))
-        st.plotly_chart(fig_rate, use_container_width=True)
-
-    with col_chart2:
-        st.subheader("3️⃣ 카테고리별 누적 지출 순위 (Top Spending)")
-        var_exp = df_var[df_var['type'] == '지출'] if not df_var.empty else pd.DataFrame()
-        if not var_exp.empty:
-            cat_ranked = var_exp.groupby("category")["amount"].sum().reset_index()
-            cat_ranked = cat_ranked.sort_values(by="amount", ascending=True)
-            fig_rank = px.bar(
-                cat_ranked, 
-                x="amount", 
-                y="category", 
-                orientation='h',
-                text="amount",
-                color="amount",
-                color_continuous_scale="Reds"
-            )
-            fig_rank.update_traces(texttemplate='%{text:,}원', textposition='outside')
-            fig_rank.update_layout(xaxis_title="총 지출액 (원)", yaxis_title="분류", coloraxis_showscale=False)
-            st.plotly_chart(fig_rank, use_container_width=True)
-        else:
-            st.info("지출 내역이 충분하지 않습니다.")
+    col_pw1, _ = st.columns([1.2, 1])
+    with col_pw1:
+        with st.form("change_password_form", clear_on_submit=True):
+            current_pw_input = st.text_input("현재 비밀번호", type="password")
+            new_pw_input = st.text_input("새로운 비밀번호", type="password")
+            confirm_pw_input = st.text_input("새로운 비밀번호 확인", type="password")
+            
+            btn_pw_submit = st.form_submit_button("비밀번호 변경하기", use_container_width=True)
+            
+            if btn_pw_submit:
+                real_pw = get_stored_password()
+                if current_pw_input != real_pw:
+                    st.error("현재 비밀번호가 일치하지 않습니다.")
+                elif not new_pw_input:
+                    st.error("새로운 비밀번호를 입력해 주세요.")
+                elif new_pw_input != confirm_pw_input:
+                    st.error("새로운 비밀번호와 비밀번호 확인이 일치하지 않습니다.")
+                else:
+                    update_stored_password(new_pw_input)
+                    st.success("비밀번호가 성공적으로 변경되었습니다! 다음 접속 시 새 비밀번호로 로그인해 주세요.")
+                    st.balloons()
